@@ -1,0 +1,454 @@
+"""Attendance repository — writes to both DUTY_ROSTER and ATTENDANCE_RECORDS.
+
+Table: DUTY_ROSTER
+Key columns:
+    DUTY_ROSTER_PK (NUMBER PK), EMP_FK (NUMBER), CARD_NO (NUMBER),
+    ROSTER_DATE (DATE), ROSTER_SHIFT (CHAR(1)),
+    IN_TIME (VARCHAR2(20)), OUT_TIME (VARCHAR2(20)),
+    W_HRS (NUMBER), W_MNT (NUMBER),
+    LATE_HRS (NUMBER), LATE_MNT (NUMBER),
+    OT_HRS (NUMBER), OT_MNT (NUMBER),
+    ABSENT_DAYS (NUMBER), STATUS (VARCHAR2(100)),
+    DUTY_HRS (NUMBER), DAY_NAME (VARCHAR2(20)),
+    ROSTER_REMARKS (VARCHAR2(200)),
+    ROSTER_MONTH (VARCHAR2(20)),
+    SHIFT_START_TIME (VARCHAR2(20)), SHIFT_END_TIME (VARCHAR2(20)),
+    ATT_MRK_TM (VARCHAR2(30)),
+    COMPC (NUMBER), BRNCH (NUMBER)
+
+Table: ATTENDANCE_RECORDS
+Key columns:
+    ID (NUMBER PK), EMPCODE (VARCHAR2(30)), CARD_NO (VARCHAR2(100)),
+    ENTRY_TIME (VARCHAR2(20)), EXIT_TIME (VARCHAR2(20)),
+    TIME_SPENT (NUMBER), ATTENDANCE_DATE (DATE),
+    LONGITUDE (VARCHAR2(50)), LATITUDE (VARCHAR2(50)),
+    ACCURACY (VARCHAR2(50)), ADDRESS (VARCHAR2(100)),
+    FORMATTED_ADDRESS (VARCHAR2(400)), LOCATION_NAME (VARCHAR2(200)),
+    ATTENDANCE_TYPE (VARCHAR2(100)),
+    DEVICE_ID (VARCHAR2(400)), DEVICE_MODEL (VARCHAR2(400)),
+    DEVICE_TYPE (VARCHAR2(100)), DEVICE_INFO (VARCHAR2(400)),
+    APP_VERSION (VARCHAR2(400)), TIMESTAMP (VARCHAR2(400)),
+    CLIENT_IP (VARCHAR2(100)), SCREENSHOT_FILENAME (VARCHAR2(200))
+"""
+
+from datetime import datetime
+from core.database import get_connection
+
+
+def _now_hhmm() -> str:
+    """Return current time as HH:MI (24h) string."""
+    return datetime.now().strftime("%H:%M")
+
+
+def _time_spent_minutes(entry: str, exit_: str) -> int:
+    """Calculate minutes between two HH:MI strings."""
+    try:
+        fmt = "%H:%M"
+        t1 = datetime.strptime(entry.strip()[:5], fmt)
+        t2 = datetime.strptime(exit_.strip()[:5], fmt)
+        diff = (t2 - t1).total_seconds() / 60
+        return max(int(diff), 0)
+    except Exception:
+        return 0
+
+
+# ------------------------------------------------------------------
+# SMART ATTENDANCE: get today's record for a card_no
+# ------------------------------------------------------------------
+
+def get_today_record(card_no: str):
+    """Return today's attendance row for this CARD_NO, or None."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT DUTY_ROSTER_PK, IN_TIME, OUT_TIME, CARD_NO
+            FROM DUTY_ROSTER
+            WHERE CARD_NO = :card
+              AND TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
+            ORDER BY DUTY_ROSTER_PK DESC
+            FETCH FIRST 1 ROWS ONLY
+        """, {"card": card_no})
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "entry_time": (row[1] or "").strip(),
+            "exit_time": (row[2] or "").strip(),
+            "card_no": str(row[3]) if row[3] else card_no,
+        }
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# LOOK UP EMP_FK (EMPCODE) from EMPLOYEE table for a given CARD_NO
+# ------------------------------------------------------------------
+
+def _get_empcode(card_no: str) -> str:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT EMPCODE FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
+        """, {"card": card_no})
+        row = cursor.fetchone()
+        return row[0] if row else card_no
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _get_emp_fk(card_no: str):
+    """Get numeric EMP_FK for DUTY_ROSTER from EMPLOYEE table."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT EMP_PK FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
+        """, {"card": card_no})
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _get_compc_brnch(card_no: str):
+    """Get COMPC and BRNCH for the employee."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT NVL(COMPC, 1), NVL(BRNCH, 1)
+            FROM EMPLOYEE
+            WHERE TO_CHAR(CARD_NO) = :card
+        """, {"card": card_no})
+        row = cursor.fetchone()
+        return (row[0], row[1]) if row else (1, 1)
+    except Exception:
+        return (1, 1)
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# CHECK-IN: update existing DUTY_ROSTER row or insert new one
+# ------------------------------------------------------------------
+
+def insert_check_in(card_no: str, empcode: str, *,
+                    latitude=None, longitude=None, accuracy=None,
+                    address=None, formatted_address=None,
+                    timestamp=None, device_id=None,
+                    device_model=None, app_version=None,
+                    attendance_type="check_in"):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        now = _now_hhmm()
+
+        # ---- 1. DUTY_ROSTER ----
+        cursor.execute("""
+            SELECT DUTY_ROSTER_PK
+            FROM DUTY_ROSTER
+            WHERE CARD_NO = :card
+              AND TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
+            ORDER BY DUTY_ROSTER_PK DESC
+            FETCH FIRST 1 ROWS ONLY
+        """, {"card": card_no})
+        existing = cursor.fetchone()
+
+        if existing:
+            cursor.execute("""
+                UPDATE DUTY_ROSTER
+                SET IN_TIME = :in_time,
+                    ATT_MRK_TM = :att_mrk,
+                    STATUS = 'Present'
+                WHERE DUTY_ROSTER_PK = :pk
+            """, {"in_time": now, "att_mrk": now, "pk": existing[0]})
+        else:
+            emp_fk = _get_emp_fk(card_no)
+            compc, brnch = _get_compc_brnch(card_no)
+            today = datetime.now()
+            day_name = today.strftime("%A")
+            roster_month = today.strftime("%b-%Y").upper()
+
+            cursor.execute("""
+                INSERT INTO DUTY_ROSTER (
+                    EMP_FK, CARD_NO, ROSTER_DATE,
+                    IN_TIME, STATUS, DAY_NAME, ROSTER_MONTH,
+                    ATT_MRK_TM, COMPC, BRNCH, ABSENT_DAYS
+                ) VALUES (
+                    :emp_fk, :card, TRUNC(SYSDATE),
+                    :in_time, 'Present', :day_name, :roster_month,
+                    :att_mrk, :compc, :brnch, 0
+                )
+            """, {
+                "emp_fk": emp_fk or card_no,
+                "card": card_no,
+                "in_time": now,
+                "day_name": day_name,
+                "roster_month": roster_month,
+                "att_mrk": now,
+                "compc": compc,
+                "brnch": brnch,
+            })
+
+        # ---- 2. ATTENDANCE_RECORDS ----
+        try:
+            cursor.execute("""
+                INSERT INTO ATTENDANCE_RECORDS (
+                    ID, EMPCODE, CARD_NO, ENTRY_TIME,
+                    ATTENDANCE_DATE, ATTENDANCE_TYPE,
+                    LATITUDE, LONGITUDE, ACCURACY,
+                    ADDRESS, FORMATTED_ADDRESS,
+                    TIMESTAMP, DEVICE_ID, DEVICE_MODEL,
+                    APP_VERSION
+                ) VALUES (
+                    (SELECT NVL(MAX(ID), 0) + 1 FROM ATTENDANCE_RECORDS),
+                    :empcode, :card_no, :entry_time,
+                    TRUNC(SYSDATE), :att_type,
+                    :latitude, :longitude, :accuracy,
+                    :address, :formatted_address,
+                    :ts, :device_id, :device_model,
+                    :app_version
+                )
+            """, {
+                "empcode": empcode,
+                "card_no": card_no,
+                "entry_time": now,
+                "att_type": attendance_type,
+                "latitude": str(latitude) if latitude else None,
+                "longitude": str(longitude) if longitude else None,
+                "accuracy": str(accuracy) if accuracy else None,
+                "address": str(address)[:100] if address else None,
+                "formatted_address": str(formatted_address)[:400] if formatted_address else None,
+                "ts": str(timestamp) if timestamp else None,
+                "device_id": str(device_id)[:400] if device_id else None,
+                "device_model": str(device_model)[:400] if device_model else None,
+                "app_version": str(app_version)[:400] if app_version else None,
+            })
+        except Exception as ar_err:
+            print(f"[ATTENDANCE_RECORDS] INSERT failed (non-fatal): {ar_err}")
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "message": "Checked in successfully",
+            "action": "check_in",
+            "marked_at": now,
+            "location_verified": latitude is not None,
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# CHECK-OUT: update existing record
+# ------------------------------------------------------------------
+
+def update_check_out(record_id: int, entry_time: str, card_no: str = None):
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        now = _now_hhmm()
+        spent = _time_spent_minutes(entry_time, now)
+        w_hrs = spent // 60
+        w_mnt = spent % 60
+
+        # ---- 1. DUTY_ROSTER ----
+        cursor.execute("""
+            UPDATE DUTY_ROSTER
+            SET OUT_TIME = :out_time,
+                W_HRS    = :w_hrs,
+                W_MNT    = :w_mnt
+            WHERE DUTY_ROSTER_PK = :rid
+        """, {"out_time": now, "w_hrs": w_hrs, "w_mnt": w_mnt, "rid": record_id})
+
+        # ---- 2. ATTENDANCE_RECORDS — update today's row ----
+        if card_no:
+            try:
+                cursor.execute("""
+                    UPDATE ATTENDANCE_RECORDS
+                    SET EXIT_TIME   = :exit_time,
+                        TIME_SPENT  = :time_spent
+                    WHERE CARD_NO = :card_no
+                      AND TRUNC(ATTENDANCE_DATE) = TRUNC(SYSDATE)
+                      AND EXIT_TIME IS NULL
+                """, {
+                    "exit_time": now,
+                    "time_spent": spent,
+                    "card_no": card_no,
+                })
+            except Exception as ar_err:
+                print(f"[ATTENDANCE_RECORDS] UPDATE failed (non-fatal): {ar_err}")
+
+        conn.commit()
+
+        return {
+            "status": "success",
+            "message": f"Checked out successfully ({spent} min)",
+            "action": "check_out",
+            "marked_at": now,
+            "time_spent": spent,
+            "location_verified": True,
+        }
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# ATTENDANCE REPORT — single day (ORDS-style date)
+# ------------------------------------------------------------------
+
+def get_attendance_report(card_no: str, date_str: str):
+    """date_str: ORDS-style e.g. '9-feb-2026' (DD-MON-YYYY)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                TRUNC(ROSTER_DATE)              AS roster_date,
+                IN_TIME                         AS in_time,
+                OUT_TIME                        AS out_time,
+                NVL(ROSTER_SHIFT, 'G')          AS roster_shift,
+                NVL(ABSENT_DAYS, 0)             AS absent_days,
+                NVL(STATUS, CASE
+                    WHEN IN_TIME IS NOT NULL THEN 'Present'
+                    ELSE 'Absent'
+                END)                            AS status,
+                NVL(W_HRS, 0)                   AS w_hrs,
+                NVL(W_MNT, 0)                   AS w_mnt,
+                NVL(LATE_HRS, 0)                AS late_hrs,
+                NVL(LATE_MNT, 0)                AS late_mnt,
+                NVL(OT_HRS, 0)                  AS ot_hrs,
+                NVL(OT_MNT, 0)                  AS ot_mnt,
+                ROSTER_REMARKS                  AS roster_remarks
+            FROM DUTY_ROSTER
+            WHERE CARD_NO = :card
+              AND TRUNC(ROSTER_DATE) = TO_DATE(:dt, 'DD-MON-YYYY')
+        """, {"card": card_no, "dt": date_str})
+
+        rows = cursor.fetchall()
+        columns = [col[0].lower() for col in cursor.description]
+        result = [dict(zip(columns, r)) for r in rows]
+
+        for row in result:
+            if row.get("roster_date") and hasattr(row["roster_date"], "strftime"):
+                row["roster_date"] = row["roster_date"].strftime("%Y-%m-%d")
+
+        return result
+    except Exception as e:
+        err = str(e)
+        if "ORA-00942" in err:
+            return []
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# ATTENDANCE REPORT — bulk date range (single query)
+# ------------------------------------------------------------------
+
+def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
+    """Fetch all attendance records in a date range. from_date/to_date: 'YYYY-MM-DD'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                TRUNC(ROSTER_DATE)              AS roster_date,
+                IN_TIME                         AS in_time,
+                OUT_TIME                        AS out_time,
+                NVL(ROSTER_SHIFT, 'G')          AS roster_shift,
+                NVL(ABSENT_DAYS, 0)             AS absent_days,
+                NVL(STATUS, CASE
+                    WHEN IN_TIME IS NOT NULL THEN 'Present'
+                    ELSE 'Absent'
+                END)                            AS status,
+                NVL(W_HRS, 0)                   AS w_hrs,
+                NVL(W_MNT, 0)                   AS w_mnt,
+                NVL(LATE_HRS, 0)                AS late_hrs,
+                NVL(LATE_MNT, 0)                AS late_mnt,
+                NVL(OT_HRS, 0)                  AS ot_hrs,
+                NVL(OT_MNT, 0)                  AS ot_mnt,
+                ROSTER_REMARKS                  AS roster_remarks
+            FROM DUTY_ROSTER
+            WHERE CARD_NO = :card
+              AND TRUNC(ROSTER_DATE) BETWEEN
+                  TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
+            ORDER BY ROSTER_DATE
+        """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+
+        rows = cursor.fetchall()
+        columns = [col[0].lower() for col in cursor.description]
+        result = [dict(zip(columns, r)) for r in rows]
+
+        for row in result:
+            if row.get("roster_date") and hasattr(row["roster_date"], "strftime"):
+                row["roster_date"] = row["roster_date"].strftime("%Y-%m-%d")
+
+        return result
+    except Exception as e:
+        err = str(e)
+        if "ORA-00942" in err:
+            return []
+        raise
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ------------------------------------------------------------------
+# ATTENDANCE SUMMARY — aggregated stats for date range
+# ------------------------------------------------------------------
+
+def get_attendance_summary(card_no: str, from_date: str, to_date: str):
+    """from_date / to_date: 'YYYY-MM-DD'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS total_days,
+                SUM(CASE WHEN IN_TIME IS NOT NULL
+                              AND OUT_TIME IS NOT NULL THEN 1 ELSE 0 END) AS present,
+                SUM(CASE WHEN IN_TIME IS NOT NULL
+                              AND OUT_TIME IS NULL THEN 1 ELSE 0 END) AS incomplete,
+                NVL(SUM(NVL(W_HRS, 0) * 60 + NVL(W_MNT, 0)), 0) AS total_minutes,
+                NVL(SUM(NVL(LATE_HRS, 0) * 60 + NVL(LATE_MNT, 0)), 0) AS late_minutes,
+                NVL(SUM(NVL(OT_HRS, 0) * 60 + NVL(OT_MNT, 0)), 0) AS overtime_minutes,
+                NVL(SUM(NVL(ABSENT_DAYS, 0)), 0) AS absent_days
+            FROM DUTY_ROSTER
+            WHERE CARD_NO = :card
+              AND TRUNC(ROSTER_DATE) BETWEEN
+                  TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
+        """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        columns = [col[0].lower() for col in cursor.description]
+        return dict(zip(columns, row))
+    except Exception as e:
+        err = str(e)
+        if "ORA-00942" in err:
+            return {}
+        raise
+    finally:
+        cursor.close()
+        conn.close()
