@@ -8,6 +8,7 @@ from repositories.face_repository import (
     is_face_registered,
     set_face_registered,
     store_face_embeddings,
+    get_all_registered_employees,
 )
 
 
@@ -60,4 +61,32 @@ def verify_face(card_no: str, frames: list) -> dict:
         "is_match": True,
         "confidence": 0.95,
         "message": "Face verified successfully",
+    }
+
+
+def identify_face(frames: list) -> dict:
+    """Identify a person from face frames (1:N search).
+
+    Stub: returns the first registered employee found.
+    When real ML is integrated, this will compare against all stored embeddings.
+    """
+    registered = get_all_registered_employees()
+    if not registered:
+        return {
+            "identified": False,
+            "card_no": None,
+            "emp_name": None,
+            "confidence": 0.0,
+            "message": "No registered faces found in the system",
+        }
+
+    # TODO: extract embeddings from frames, compare against all registered
+    # For now, return the first registered employee as a stub
+    match = registered[0]
+    return {
+        "identified": True,
+        "card_no": match["card_no"],
+        "emp_name": match["emp_name"],
+        "confidence": 0.92,
+        "message": f"Face identified as {match['emp_name']}",
     }

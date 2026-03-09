@@ -26,6 +26,10 @@ class FaceVerifyResponse(BaseModel):
     message: str = ""
 
 
+class FaceIdentifyRequest(BaseModel):
+    frames: List[str]           # base64-encoded JPEG images (no card_no needed)
+
+
 class FaceStatusResponse(BaseModel):
     is_registered: bool
     card_no: str

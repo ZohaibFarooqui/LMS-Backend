@@ -44,7 +44,12 @@ def smart_mark_attendance(card_no: str, attendance_type: str = "check_in", **kwa
 
     if entry and not exit_:
         # Has entry but no exit → check out
-        result = update_check_out(record["id"], entry, card_no=record.get("card_no", card_no))
+        source = record.get("source", "duty_roster")
+        result = update_check_out(
+            record["id"], entry,
+            card_no=record.get("card_no", card_no),
+            source=source,
+        )
         return result
 
     # Both entry and exit exist

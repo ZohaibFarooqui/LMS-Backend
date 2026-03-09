@@ -8,8 +8,8 @@ Matches the Flutter FaceRemoteDataSourceImpl which calls:
 
 from fastapi import APIRouter, HTTPException
 
-from models.face_models import FaceRegisterRequest, FaceVerifyRequest
-from services.face_service import register_face, verify_face, check_face_status
+from models.face_models import FaceRegisterRequest, FaceVerifyRequest, FaceIdentifyRequest
+from services.face_service import register_face, verify_face, check_face_status, identify_face
 
 router = APIRouter(prefix="/face", tags=["Face Authentication"])
 
@@ -45,6 +45,25 @@ def face_verify(request: FaceVerifyRequest):
         "body": {
             "is_match": result["is_match"],
             "confidence": result["confidence"],
+            "message": result.get("message", ""),
+        }
+    }
+
+
+@router.post("/identify")
+def face_identify(request: FaceIdentifyRequest):
+    if len(request.frames) < 5:
+        raise HTTPException(
+            status_code=400,
+            detail="Minimum 5 frames required",
+        )
+    result = identify_face(request.frames)
+    return {
+        "body": {
+            "identified": result["identified"],
+            "card_no": result.get("card_no"),
+            "emp_name": result.get("emp_name"),
+            "confidence": result.get("confidence", 0.0),
             "message": result.get("message", ""),
         }
     }

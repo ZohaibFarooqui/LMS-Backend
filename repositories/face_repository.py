@@ -71,3 +71,24 @@ def get_stored_embeddings(card_no: str) -> list:
     # TODO: when ML model is integrated:
     #   SELECT EMBEDDING, IMAGE_INDEX FROM EMP_FACE_DATA WHERE CARD_NO = :card
     return []
+
+
+def get_all_registered_employees() -> list:
+    """Return all employees with FACE_REGISTERED = 'Y'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT TO_CHAR(CARD_NO), EMP_NAME
+            FROM EMPLOYEE
+            WHERE NVL(FACE_REGISTERED, 'N') = 'Y'
+        """)
+        rows = cursor.fetchall()
+        return [{"card_no": str(r[0]), "emp_name": r[1] or ""} for r in rows]
+    except Exception as e:
+        if "ORA-00904" in str(e):
+            return []
+        raise
+    finally:
+        cursor.close()
+        conn.close()
