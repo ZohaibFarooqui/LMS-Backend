@@ -8,30 +8,41 @@ from threading import Lock
 import json
 from datetime import datetime
 import oracledb
-# import onnxruntime as ort
 
-# # Silent-Face Anti-Spoofing model
-# sf_model_path = r"C:\Users\Saif Pc\.insightface\models\w.onnx"
-# sf_sess = ort.InferenceSession(sf_model_path, providers=["CPUExecutionProvider"])
+# ******* ENV — auto-detect models path
+# Priority: INSIGHTFACE_HOME env var > Server path > Local dev path
+if not os.environ.get('INSIGHTFACE_HOME'):
+    # Server: Administrator, Local dev: ABC
+    for candidate in [
+        r'C:/Users/ABC/.insightface/models',
+        r'C:/Users/ABC/.insightface/models',
+    ]:
+        if os.path.isdir(candidate):
+            os.environ['INSIGHTFACE_HOME'] = candidate
+            break
 
+print(f"Models path: {os.environ.get('INSIGHTFACE_HOME', 'NOT SET')}")
 
-# ******* ENV 
-os.environ['INSIGHTFACE_HOME'] = r'C:/Users/Administrator/.insightface/models'
-print(f"Models path: {os.environ['INSIGHTFACE_HOME']}") 
-
-# *******INSIGHTFACE 
+# *******INSIGHTFACE
 face_app = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"])
 face_app.prepare(ctx_id=0, det_size=(640, 640))
 
-# ********DATABASE 
+# ********DATABASE
 BASE = "face_db"
 os.makedirs(BASE, exist_ok=True)
 
 # ******* oracle connection
 def get_db_connection():
-    dsn = os.getenv("ORACLE_DSN")  
-    conn = oracledb.connect(dsn)
-    return conn
+    """Connect using ORACLE_DSN env var, or fall back to server defaults."""
+    dsn = os.getenv("ORACLE_DSN")
+    if dsn:
+        return oracledb.connect(dsn)
+    # Fallback: direct connection to server Oracle
+    return oracledb.connect(
+        user=os.getenv("ORACLE_USER", "fhr"),
+        password=os.getenv("ORACLE_PASS", "fhr"),
+        dsn=os.getenv("ORACLE_HOST", "localhost") + ":1521/apexdb",
+    )
 
 
 faiss_lock = Lock()
@@ -248,6 +259,73 @@ def verify_face(card_no1: str, b64_images: list):
     return {"body": {"is_match": False, "confidence": final_similarity,
                      "msg": "Face did not match"}}
 
+
+
+# ******** IDENTIFY (1:N search) ********
+def identify_face(b64_images: list):
+    """1:N face search — find who this person is from all registered faces."""
+    if index is None or len(labels) == 0:
+        return {"body": {"identified": False, "confidence": 0.0,
+                         "message": "No registered faces in the system"}}
+
+    embeddings = []
+    for b64 in b64_images:
+        try:
+            img = decode_base64_image(b64)
+            if img is None:
+                continue
+        except Exception:
+            continue
+        emb = extract_embedding(img)
+        if emb is not None:
+            embeddings.append(emb)
+
+    if len(embeddings) < 5:
+        return {"body": {"identified": False, "confidence": 0.0,
+                         "message": "Not enough valid face frames"}}
+
+    # Average embedding for stability
+    mean_emb = np.mean(np.array(embeddings), axis=0)
+    mean_emb = mean_emb / np.linalg.norm(mean_emb)
+    mean_emb = mean_emb.astype("float32").reshape(1, -1)
+
+    with faiss_lock:
+        D, I = index.search(mean_emb, 1)
+        best_sim = float(D[0][0])
+        best_idx = int(I[0][0])
+
+    if best_sim < 0.55:
+        return {"body": {"identified": False, "confidence": best_sim,
+                         "message": "Face not recognized"}}
+
+    matched_card = labels[best_idx]
+
+    # Try to get emp_name from Oracle
+    emp_name = ""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT EMP_NAME FROM EMPLOYEE
+            WHERE TRIM(TO_CHAR(CARD_NO)) = :card
+        """, {"card": matched_card})
+        row = cursor.fetchone()
+        if row:
+            emp_name = row[0] or ""
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"[identify_face] Could not fetch emp_name: {e}")
+
+    return {
+        "body": {
+            "identified": True,
+            "card_no": matched_card,
+            "emp_name": emp_name,
+            "confidence": best_sim,
+            "message": f"Face identified as {emp_name or matched_card}"
+        }
+    }
 
 
 def face_status(card_no1: str):

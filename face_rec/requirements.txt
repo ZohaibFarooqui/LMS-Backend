@@ -14,7 +14,7 @@ coloredlogs==15.0.1
 contourpy==1.3.2
 cycler==0.12.1
 Cython==3.2.3
-dlib @ file:///C:/Users/Saif%20Pc/Desktop/face_rec/dlib-19.22.99-cp310-cp310-win_amd64.whl
+dlib @ file:///D:/LMS/LMS-Backend/face_rec/dlib-19.22.99-cp310-cp310-win_amd64.whl
 easydict==1.13
 exceptiongroup==1.3.1
 faiss-cpu==1.7.4
@@ -25,7 +25,7 @@ h11==0.16.0
 humanfriendly==10.0
 idna==3.11
 ImageIO==2.37.2
-insightface @ file:///C:/Users/Saif%20Pc/Desktop/face_rec/insightface-0.7.3-cp310-cp310-win_amd64.whl
+insightface @ file:///D:/LMS/LMS-Backend/face_rec/insightface-0.7.3-cp310-cp310-win_amd64.whl
 joblib==1.5.3
 kiwisolver==1.4.9
 lazy_loader==0.4
@@ -35,6 +35,7 @@ ml_dtypes==0.5.4
 mpmath==1.3.0
 networkx==3.4.2
 numpy==1.23.5
+oracledb>=1.4.0
 onnx==1.20.0
 onnxruntime==1.15.1
 opencv-contrib-python==4.12.0.88
