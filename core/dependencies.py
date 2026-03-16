@@ -10,6 +10,16 @@ _DEFAULT = {
 }
 
 
+def _normalize_card_no(card_no: str) -> str:
+    """Strip trailing decimal from card_no (e.g. '100002.1' → '100002')."""
+    if not card_no:
+        return card_no
+    s = str(card_no).strip()
+    if '.' in s:
+        s = s.split('.')[0]
+    return s
+
+
 def get_employee_flags(card_no: str) -> dict:
     """Fetch emp_name, face_registered, hr_admin for a given card_no.
 
@@ -22,6 +32,7 @@ def get_employee_flags(card_no: str) -> dict:
       3. HR_EMP_MASTER only via ATDTCARD# = card_no
       4. EMPLOYEE only                                    (ORA-00942)
     """
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -34,7 +45,7 @@ def get_employee_flags(card_no: str) -> dict:
                        e.EMPCODE
                 FROM EMPLOYEE e
                 LEFT JOIN HR_EMP_MASTER h ON e.EMPCODE = h.EMPCODE
-                WHERE TO_CHAR(e.CARD_NO) = :card
+                WHERE TRIM(TO_CHAR(e.CARD_NO)) = :card
             """, {"card": card_no})
             row = cursor.fetchone()
             if row:
@@ -60,7 +71,7 @@ def get_employee_flags(card_no: str) -> dict:
                        e.EMPCODE
                 FROM EMPLOYEE e
                 LEFT JOIN HR_EMP_MASTER h ON e.EMPCODE = h.EMPCODE
-                WHERE TO_CHAR(e.CARD_NO) = :card
+                WHERE TRIM(TO_CHAR(e.CARD_NO)) = :card
             """, {"card": card_no})
             row = cursor2.fetchone()
             if row:
@@ -108,7 +119,7 @@ def get_employee_flags(card_no: str) -> dict:
             cursor4.execute("""
                 SELECT EMP_NAME, EMPCODE
                 FROM EMPLOYEE
-                WHERE TO_CHAR(CARD_NO) = :card
+                WHERE TRIM(TO_CHAR(CARD_NO)) = :card
             """, {"card": card_no})
             row = cursor4.fetchone()
             if not row:

@@ -5,6 +5,7 @@ from routers.auth_router import router as auth_router
 from routers.attendance_router import router as attendance_router
 from routers.face_router import router as face_router
 from routers.hr_router import router as hr_router
+from routers.hrms_router import router as hrms_router
 
 app = FastAPI(title="LMS API")
 
@@ -26,6 +27,8 @@ app.include_router(attendance_router)
 app.include_router(face_router)
 # HR admin routes (/hr/employees/search, /hr/face/enroll)
 app.include_router(hr_router)
+# HRMS routes (/hrms/employees — register, search, edit)
+app.include_router(hrms_router)
 
 if __name__ == "__main__":
     import uvicorn

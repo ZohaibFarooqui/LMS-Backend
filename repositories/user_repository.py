@@ -201,7 +201,7 @@ def get_user_profile(card_no: str):
                 e.date_of_birth,
                 e.date_of_join,
                 e.department,
-                e.designation,       
+                e.designation,
                 e.nic_no,
                 e.nic_exp_date,
                 e.eobi_no,

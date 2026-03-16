@@ -35,6 +35,22 @@ from datetime import datetime
 from core.database import get_connection
 
 
+def _normalize_card_no(card_no: str) -> str:
+    """Strip trailing '.0' / decimal from card_no.
+
+    Oracle NUMBER → Python float gives '100002.1' or '100002.0'.
+    The EMPLOYEE table stores CARD_NO as a plain integer number,
+    so TO_CHAR(CARD_NO) yields '100002'. We must match that.
+    """
+    if not card_no:
+        return card_no
+    s = str(card_no).strip()
+    # Remove trailing decimal (e.g. '100002.1' → '100002', '100002.0' → '100002')
+    if '.' in s:
+        s = s.split('.')[0]
+    return s
+
+
 def _now_hhmm() -> str:
     """Return current time as HH:MI (24h) string."""
     return datetime.now().strftime("%H:%M")
@@ -62,6 +78,7 @@ def get_today_record(card_no: str):
     Checks DUTY_ROSTER first (has DUTY_ROSTER_PK needed for check-out UPDATE).
     Falls back to ATTENDANCE_RECORDS if no DUTY_ROSTER row found.
     """
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -117,14 +134,17 @@ def get_today_record(card_no: str):
 # ------------------------------------------------------------------
 
 def _get_empcode(card_no: str) -> str:
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT EMPCODE FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
+            SELECT EMPCODE FROM EMPLOYEE WHERE TRIM(TO_CHAR(CARD_NO)) = :card
         """, {"card": card_no})
         row = cursor.fetchone()
-        return row[0] if row else card_no
+        empcode = row[0] if row else card_no
+        print(f"[_get_empcode] card_no={card_no} → empcode={empcode} (found={row is not None})")
+        return empcode
     finally:
         cursor.close()
         conn.close()
@@ -132,11 +152,12 @@ def _get_empcode(card_no: str) -> str:
 
 def _get_emp_fk(card_no: str):
     """Get numeric EMP_FK for DUTY_ROSTER from EMPLOYEE table."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT EMP_PK FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
+            SELECT EMP_PK FROM EMPLOYEE WHERE TRIM(TO_CHAR(CARD_NO)) = :card
         """, {"card": card_no})
         row = cursor.fetchone()
         return row[0] if row else None
@@ -147,13 +168,14 @@ def _get_emp_fk(card_no: str):
 
 def _get_compc_brnch(card_no: str):
     """Get COMPC and BRNCH for the employee."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
             SELECT NVL(COMPC, 1), NVL(BRNCH, 1)
             FROM EMPLOYEE
-            WHERE TO_CHAR(CARD_NO) = :card
+            WHERE TRIM(TO_CHAR(CARD_NO)) = :card
         """, {"card": card_no})
         row = cursor.fetchone()
         return (row[0], row[1]) if row else (1, 1)
@@ -174,6 +196,7 @@ def insert_check_in(card_no: str, empcode: str, *,
                     timestamp=None, device_id=None,
                     device_model=None, app_version=None,
                     attendance_type="check_in"):
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -228,24 +251,12 @@ def insert_check_in(card_no: str, empcode: str, *,
 
         # ---- 2. ATTENDANCE_RECORDS ----
         try:
-            cursor.execute("""
-                INSERT INTO ATTENDANCE_RECORDS (
-                    ID, EMPCODE, CARD_NO, ENTRY_TIME,
-                    ATTENDANCE_DATE, ATTENDANCE_TYPE,
-                    LATITUDE, LONGITUDE, ACCURACY,
-                    ADDRESS, FORMATTED_ADDRESS,
-                    TIMESTAMP, DEVICE_ID, DEVICE_MODEL,
-                    APP_VERSION
-                ) VALUES (
-                    (SELECT NVL(MAX(ID), 0) + 1 FROM ATTENDANCE_RECORDS),
-                    :empcode, :card_no, :entry_time,
-                    TRUNC(SYSDATE), :att_type,
-                    :latitude, :longitude, :accuracy,
-                    :address, :formatted_address,
-                    :ts, :device_id, :device_model,
-                    :app_version
-                )
-            """, {
+            # Get next ID safely
+            cursor.execute("SELECT NVL(MAX(ID), 0) + 1 FROM ATTENDANCE_RECORDS")
+            next_id = cursor.fetchone()[0]
+
+            ar_params = {
+                "id": int(next_id),
                 "empcode": empcode,
                 "card_no": card_no,
                 "entry_time": now,
@@ -259,9 +270,32 @@ def insert_check_in(card_no: str, empcode: str, *,
                 "device_id": str(device_id)[:400] if device_id else None,
                 "device_model": str(device_model)[:400] if device_model else None,
                 "app_version": str(app_version)[:400] if app_version else None,
-            })
+            }
+            print(f"[ATTENDANCE_RECORDS] INSERT params: id={next_id}, empcode={empcode}, card_no={card_no}, entry_time={now}")
+
+            cursor.execute("""
+                INSERT INTO ATTENDANCE_RECORDS (
+                    ID, EMPCODE, CARD_NO, ENTRY_TIME,
+                    ATTENDANCE_DATE, ATTENDANCE_TYPE,
+                    LATITUDE, LONGITUDE, ACCURACY,
+                    ADDRESS, FORMATTED_ADDRESS,
+                    TIMESTAMP, DEVICE_ID, DEVICE_MODEL,
+                    APP_VERSION
+                ) VALUES (
+                    :id,
+                    :empcode, :card_no, :entry_time,
+                    TRUNC(SYSDATE), :att_type,
+                    :latitude, :longitude, :accuracy,
+                    :address, :formatted_address,
+                    :ts, :device_id, :device_model,
+                    :app_version
+                )
+            """, ar_params)
+            print(f"[ATTENDANCE_RECORDS] INSERT SUCCESS - ID={next_id}")
         except Exception as ar_err:
-            print(f"[ATTENDANCE_RECORDS] INSERT failed (non-fatal): {ar_err}")
+            import traceback
+            print(f"[ATTENDANCE_RECORDS] INSERT FAILED: {ar_err}")
+            traceback.print_exc()
 
         conn.commit()
 
@@ -286,6 +320,7 @@ def insert_check_in(card_no: str, empcode: str, *,
 
 def update_check_out(record_id: int, entry_time: str, card_no: str = None,
                      source: str = "duty_roster"):
+    card_no = _normalize_card_no(card_no) if card_no else card_no
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -319,8 +354,12 @@ def update_check_out(record_id: int, entry_time: str, card_no: str = None,
                     "time_spent": spent,
                     "card_no": card_no,
                 })
+                rows_updated = cursor.rowcount
+                print(f"[ATTENDANCE_RECORDS] UPDATE exit_time={now}, time_spent={spent}, card_no={card_no} — rows updated: {rows_updated}")
             except Exception as ar_err:
-                print(f"[ATTENDANCE_RECORDS] UPDATE failed (non-fatal): {ar_err}")
+                import traceback
+                print(f"[ATTENDANCE_RECORDS] UPDATE FAILED: {ar_err}")
+                traceback.print_exc()
 
         # If record came from ATTENDANCE_RECORDS only, also try to update DUTY_ROSTER by card_no
         if source == "attendance_records" and card_no:
@@ -361,6 +400,7 @@ def update_check_out(record_id: int, entry_time: str, card_no: str = None,
 
 def get_attendance_report(card_no: str, date_str: str):
     """date_str: ORDS-style e.g. '9-feb-2026' (DD-MON-YYYY)."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -418,6 +458,7 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
     location data from the mobile app).  Falls back to DUTY_ROSTER if the
     new table doesn't exist or has no rows for the range.
     """
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -525,6 +566,7 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
 
 def get_attendance_summary(card_no: str, from_date: str, to_date: str):
     """from_date / to_date: 'YYYY-MM-DD'."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:

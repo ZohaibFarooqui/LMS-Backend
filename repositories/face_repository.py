@@ -8,15 +8,26 @@ For now, we rely on the EMPLOYEE.FACE_REGISTERED flag.
 from core.database import get_connection
 
 
+def _normalize_card_no(card_no: str) -> str:
+    """Strip trailing decimal from card_no (e.g. '100002.1' → '100002')."""
+    if not card_no:
+        return card_no
+    s = str(card_no).strip()
+    if '.' in s:
+        s = s.split('.')[0]
+    return s
+
+
 def is_face_registered(card_no: str) -> dict:
     """Check EMPLOYEE.FACE_REGISTERED flag."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
             SELECT NVL(FACE_REGISTERED, 'N')
             FROM EMPLOYEE
-            WHERE TO_CHAR(CARD_NO) = :card
+            WHERE TRIM(TO_CHAR(CARD_NO)) = :card
         """, {"card": card_no})
         row = cursor.fetchone()
         if not row:
@@ -37,13 +48,14 @@ def is_face_registered(card_no: str) -> dict:
 
 def set_face_registered(card_no: str, value: str = "Y"):
     """Update EMPLOYEE.FACE_REGISTERED flag."""
+    card_no = _normalize_card_no(card_no)
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
             UPDATE EMPLOYEE
             SET FACE_REGISTERED = :val
-            WHERE TO_CHAR(CARD_NO) = :card
+            WHERE TRIM(TO_CHAR(CARD_NO)) = :card
         """, {"val": value, "card": card_no})
         conn.commit()
     except Exception as e:
