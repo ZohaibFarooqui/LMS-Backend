@@ -280,8 +280,16 @@ def list_employees_hrms(status: str = None) -> list:
 # HR DASHBOARD — today's attendance overview across all employees
 # ------------------------------------------------------------------
 
-def get_hr_dashboard_stats() -> dict:
-    """Get aggregated stats for the HR dashboard overview."""
+def get_hr_dashboard_stats(qdate: str = None) -> dict:
+    """Get aggregated stats for the HR dashboard overview. qdate format: YYYY-MM-DD."""
+    import re
+    if qdate and re.match(r'^\d{4}-\d{2}-\d{2}$', qdate):
+        td = f"TRUNC(DATE '{qdate}')"
+        yd = f"TRUNC(DATE '{qdate}') - 1"
+    else:
+        td = "TRUNC(SYSDATE)"
+        yd = "TRUNC(SYSDATE) - 1"
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -307,8 +315,8 @@ def get_hr_dashboard_stats() -> dict:
                     SUM(CASE WHEN NVL(LATE_HRS, 0) > 0 OR NVL(LATE_MNT, 0) > 0 THEN 1 ELSE 0 END) AS late,
                     SUM(CASE WHEN UPPER(STATUS) LIKE '%LEAVE%' THEN 1 ELSE 0 END) AS on_leave
                 FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
-            """)
+                WHERE TRUNC(ROSTER_DATE) = {td}
+            """.format(td=td))
             row = cursor.fetchone()
             if row:
                 present = int(row[0] or 0)
@@ -326,8 +334,8 @@ def get_hr_dashboard_stats() -> dict:
                         COUNT(DISTINCT CARD_NO) AS present,
                         SUM(CASE WHEN ENTRY_TIME IS NOT NULL AND EXIT_TIME IS NULL THEN 1 ELSE 0 END) AS incomplete
                     FROM ATTENDANCE_RECORDS
-                    WHERE TRUNC(ATTENDANCE_DATE) = TRUNC(SYSDATE)
-                """)
+                    WHERE TRUNC(ATTENDANCE_DATE) = {td}
+                """.format(td=td))
                 row2 = cursor2.fetchone()
                 if row2:
                     present = int(row2[0] or 0)
@@ -351,12 +359,12 @@ def get_hr_dashboard_stats() -> dict:
                 LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
                 LEFT JOIN DUTY_ROSTER d
                     ON d.CARD_NO = e.CARD_NO
-                    AND TRUNC(d.ROSTER_DATE) = TRUNC(SYSDATE)
+                    AND TRUNC(d.ROSTER_DATE) = {td}
                 WHERE h.STATUS = 'A' OR h.STATUS IS NULL
                 GROUP BY NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown'))
                 ORDER BY COUNT(*) DESC
                 FETCH FIRST 10 ROWS ONLY
-            """)
+            """.format(td=td))
             rows = cursor.fetchall()
             for r in rows:
                 dept_breakdown.append({
@@ -388,8 +396,8 @@ def get_hr_dashboard_stats() -> dict:
                     SUM(CASE WHEN IN_TIME IS NOT NULL THEN 1 ELSE 0 END),
                     SUM(CASE WHEN UPPER(STATUS) LIKE '%LEAVE%' THEN 1 ELSE 0 END)
                 FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = TRUNC(SYSDATE) - 1
-            """)
+                WHERE TRUNC(ROSTER_DATE) = {yd}
+            """.format(yd=yd))
             yrow = cursor.fetchone()
             if yrow:
                 yesterday_present = int(yrow[0] or 0)
@@ -501,10 +509,10 @@ def get_hr_dashboard_stats() -> dict:
                     SUM(CASE WHEN IN_TIME IS NOT NULL THEN 1 ELSE 0 END) AS present,
                     COUNT(*) AS total
                 FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
+                WHERE TRUNC(ROSTER_DATE) = {td}
                 GROUP BY NVL(SHIFT, 'Day')
                 ORDER BY total DESC
-            """)
+            """.format(td=td))
             for r in cursor.fetchall():
                 total_s = int(r[2] or 1)
                 present_s = int(r[1] or 0)
@@ -580,8 +588,14 @@ def get_hr_dashboard_stats() -> dict:
 # HR ANALYTICS — chart data for the enhanced dashboard
 # ------------------------------------------------------------------
 
-def get_hr_analytics() -> dict:
+def get_hr_analytics(qdate: str = None) -> dict:
     """Return chart-ready analytics: daily status (30d), monthly trends (6m), KPIs."""
+    import re
+    if qdate and re.match(r'^\d{4}-\d{2}-\d{2}$', qdate):
+        td = f"TRUNC(DATE '{qdate}')"
+    else:
+        td = "TRUNC(SYSDATE)"
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -601,8 +615,8 @@ def get_hr_analytics() -> dict:
                     NVL(AVG(CASE WHEN IN_TIME IS NOT NULL AND OUT_TIME IS NOT NULL
                         THEN NVL(W_HRS,0) + NVL(W_MNT,0)/60.0 END), 0)
                 FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
-            """)
+                WHERE TRUNC(ROSTER_DATE) = {td}
+            """.format(td=td))
             row = cursor.fetchone()
             if row:
                 late_logins = int(row[0] or 0)
@@ -626,8 +640,8 @@ def get_hr_analytics() -> dict:
             total_active = int(cursor.fetchone()[0] or 0)
             cursor.execute("""
                 SELECT COUNT(*) FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = TRUNC(SYSDATE) AND IN_TIME IS NOT NULL
-            """)
+                WHERE TRUNC(ROSTER_DATE) = {td} AND IN_TIME IS NOT NULL
+            """.format(td=td))
             present = int(cursor.fetchone()[0] or 0)
             attendance_pct = round((present / total_active * 100) if total_active > 0 else 0, 1)
         except Exception:
@@ -644,10 +658,10 @@ def get_hr_analytics() -> dict:
                     SUM(CASE WHEN IN_TIME IS NULL AND NOT (UPPER(NVL(STATUS,'')) LIKE '%LEAVE%') THEN 1 ELSE 0 END),
                     TRUNC(ROSTER_DATE)
                 FROM DUTY_ROSTER
-                WHERE ROSTER_DATE >= TRUNC(SYSDATE) - 29
+                WHERE ROSTER_DATE >= {td} - 29
                 GROUP BY TO_CHAR(ROSTER_DATE, 'DD Mon'), TRUNC(ROSTER_DATE)
                 ORDER BY TRUNC(ROSTER_DATE)
-            """)
+            """.format(td=td))
             for r in cursor.fetchall():
                 daily.append({
                     "day": r[0],
@@ -672,10 +686,10 @@ def get_hr_analytics() -> dict:
                     COUNT(*) AS total_rows,
                     TRUNC(ROSTER_DATE, 'MM')
                 FROM DUTY_ROSTER
-                WHERE ROSTER_DATE >= ADD_MONTHS(TRUNC(SYSDATE, 'MM'), -5)
+                WHERE ROSTER_DATE >= ADD_MONTHS(TRUNC({td}, 'MM'), -5)
                 GROUP BY TO_CHAR(TRUNC(ROSTER_DATE, 'MM'), 'Mon YY'), TRUNC(ROSTER_DATE, 'MM')
                 ORDER BY TRUNC(ROSTER_DATE, 'MM')
-            """)
+            """.format(td=td))
             for r in cursor.fetchall():
                 total = int(r[6] or 1)
                 present_cnt = int(r[1] or 0) + int(r[4] or 0) + int(r[3] or 0)

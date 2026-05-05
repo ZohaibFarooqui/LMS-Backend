@@ -34,9 +34,9 @@ def list_employees(status: str = None) -> list:
     return list_employees_hrms(status)
 
 
-def get_dashboard() -> dict:
-    return get_hr_dashboard_stats()
+def get_dashboard(qdate: str = None) -> dict:
+    return get_hr_dashboard_stats(qdate)
 
 
-def get_analytics() -> dict:
-    return get_hr_analytics()
+def get_analytics(qdate: str = None) -> dict:
+    return get_hr_analytics(qdate)

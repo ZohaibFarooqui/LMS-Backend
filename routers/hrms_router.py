@@ -4,6 +4,7 @@ All endpoints require HR_ADMIN access (validated via admin_card_no query param).
 """
 
 from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 
 from core.dependencies import require_hr_admin
 from models.hrms_models import (
@@ -31,19 +32,21 @@ router = APIRouter(prefix="/hrms", tags=["HRMS"])
 @router.get("/dashboard")
 def hrms_dashboard(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
+    date: Optional[str] = Query(None, description="Date to query (YYYY-MM-DD), defaults to today"),
 ):
     """Get aggregated HR dashboard stats: present, absent, late, dept breakdown."""
     require_hr_admin(admin_card_no)
-    return get_dashboard()
+    return get_dashboard(qdate=date)
 
 
 @router.get("/dashboard/analytics")
 def hrms_analytics(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
+    date: Optional[str] = Query(None, description="Date to query (YYYY-MM-DD), defaults to today"),
 ):
     """Chart-ready analytics: daily status (30d), monthly trends (6m), KPIs."""
     require_hr_admin(admin_card_no)
-    return get_analytics()
+    return get_analytics(qdate=date)
 
 
 # ===================================
