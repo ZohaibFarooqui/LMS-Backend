@@ -25,12 +25,11 @@ def get_employee_flags(card_no: str) -> dict:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # ---- Attempt 1: full query ----
+        # ---- Attempt 1: EMPLOYEE + HR_EMP_MASTER (no FACE_REGISTERED) ----
         try:
             cursor.execute("""
                 SELECT e.EMP_NAME,
-                       NVL(e.FACE_REGISTERED, 'N') AS face_registered,
-                       NVL(h.HR_ADMIN, 'N')        AS hr_admin,
+                       NVL(h.HR_ADMIN, 'N') AS hr_admin,
                        e.EMPCODE
                 FROM EMPLOYEE e
                 LEFT JOIN HR_EMP_MASTER h ON e.EMPCODE = h.EMPCODE
@@ -40,9 +39,9 @@ def get_employee_flags(card_no: str) -> dict:
             if row:
                 return {
                     "emp_name": row[0] or "",
-                    "face_registered": row[1] or "N",
-                    "hr_admin": row[2] or "N",
-                    "empcode": row[3] or "",
+                    "face_registered": "N",
+                    "hr_admin": row[1] or "N",
+                    "empcode": row[2] or "",
                 }
             # No row — fall through to try HR_EMP_MASTER directly
         except Exception as e1:
@@ -50,33 +49,6 @@ def get_employee_flags(card_no: str) -> dict:
             print(f"[get_employee_flags] Attempt 1 failed: {err1}")
             if "ORA-00904" not in err1 and "ORA-00942" not in err1:
                 raise
-
-        # ---- Attempt 2: without FACE_REGISTERED, with HR_EMP_MASTER ----
-        cursor2 = conn.cursor()
-        try:
-            cursor2.execute("""
-                SELECT e.EMP_NAME,
-                       NVL(h.HR_ADMIN, 'N') AS hr_admin,
-                       e.EMPCODE
-                FROM EMPLOYEE e
-                LEFT JOIN HR_EMP_MASTER h ON e.EMPCODE = h.EMPCODE
-                WHERE TO_CHAR(e.CARD_NO) = :card
-            """, {"card": card_no})
-            row = cursor2.fetchone()
-            if row:
-                return {
-                    "emp_name": row[0] or "",
-                    "face_registered": "N",
-                    "hr_admin": row[1] or "N",
-                    "empcode": row[2] or "",
-                }
-        except Exception as e2:
-            err2 = str(e2)
-            print(f"[get_employee_flags] Attempt 2 failed: {err2}")
-            if "ORA-00904" not in err2 and "ORA-00942" not in err2:
-                raise
-        finally:
-            cursor2.close()
 
         # ---- Attempt 3: HR_EMP_MASTER only (via ATDTCARD# = card_no) ----
         cursor3 = conn.cursor()
@@ -130,5 +102,5 @@ def get_employee_flags(card_no: str) -> dict:
 def require_hr_admin(card_no: str):
     """Raise 403 if the given card_no does not belong to an HR admin."""
     flags = get_employee_flags(card_no)
-    if flags["hr_admin"] != "Y":
+    if flags["hr_admin"].upper() != "Y":
         raise HTTPException(status_code=403, detail="HR admin access required")

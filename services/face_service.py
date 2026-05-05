@@ -6,8 +6,8 @@ When a real ML model is integrated, replace the stub functions below.
 
 from repositories.face_repository import (
     is_face_registered,
-    set_face_registered,
     store_face_embeddings,
+    delete_face_registration,
     get_all_registered_employees,
 )
 
@@ -61,6 +61,23 @@ def verify_face(card_no: str, frames: list) -> dict:
         "is_match": True,
         "confidence": 0.95,
         "message": "Face verified successfully",
+    }
+
+
+def delete_face(card_no: str) -> dict:
+    """Delete face registration for an employee."""
+    status = is_face_registered(card_no)
+    if not status["is_registered"]:
+        return {
+            "status": "SUCCESS",
+            "deleted": False,
+            "msg": "No active face registration found",
+        }
+    result = delete_face_registration(card_no)
+    return {
+        "status": "SUCCESS",
+        "deleted": result["deleted"],
+        "msg": "Face deleted successfully" if result["deleted"] else "Delete failed",
     }
 
 

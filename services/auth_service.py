@@ -37,10 +37,12 @@ def login_user(username: str, password: str):
     flags = get_employee_flags(user["card_no"])
 
     # HR_ADMIN: prefer value from HR_EMP_MASTER (direct), fallback to flags
-    if user.get("hr_admin") and user["hr_admin"] != "N":
-        pass  # already set from HR_EMP_MASTER
+    # Strip whitespace in case Oracle CHAR field returns padded value
+    hr_from_master = str(user.get("hr_admin") or "N").strip().upper()
+    if hr_from_master == "Y":
+        user["hr_admin"] = "Y"
     else:
-        user["hr_admin"] = flags.get("hr_admin", "N")
+        user["hr_admin"] = str(flags.get("hr_admin", "N")).strip().upper()
 
     # EMP_NAME: prefer HR_EMP_MASTER, fallback to EMPLOYEE
     if not user.get("emp_name"):

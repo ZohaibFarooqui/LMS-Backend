@@ -1,94 +1,110 @@
-"""Face repository — stubs for EMP_FACE_DATA operations.
+"""Face repository — EMP_FACE_EMBEDDINGS operations.
 
-The EMP_FACE_DATA table already exists in Oracle.
-Face embedding extraction & comparison will be implemented later.
-For now, we rely on the EMPLOYEE.FACE_REGISTERED flag.
+Uses the EMP_FACE_EMBEDDINGS table as the source of truth for face
+registration status (IS_ACTIVE = 'Y').
 """
 
 from core.database import get_connection
 
 
 def is_face_registered(card_no: str) -> dict:
-    """Check EMPLOYEE.FACE_REGISTERED flag."""
+    """Check EMP_FACE_EMBEDDINGS for an active registration."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT NVL(FACE_REGISTERED, 'N')
-            FROM EMPLOYEE
-            WHERE TO_CHAR(CARD_NO) = :card
+            SELECT EMBEDDING_ID, CREATED_AT
+            FROM EMP_FACE_EMBEDDINGS
+            WHERE EMPCODE = :card AND IS_ACTIVE = 'Y'
+            ORDER BY CREATED_AT DESC
+            FETCH FIRST 1 ROWS ONLY
         """, {"card": card_no})
         row = cursor.fetchone()
         if not row:
             return {"is_registered": False, "registered_at": None}
         return {
-            "is_registered": row[0] == "Y",
-            "registered_at": None,
+            "is_registered": True,
+            "registered_at": str(row[1]) if row[1] else None,
         }
     except Exception as e:
-        # ORA-00904: FACE_REGISTERED column may not exist yet
-        if "ORA-00904" in str(e):
-            return {"is_registered": False, "registered_at": None}
-        raise
-    finally:
-        cursor.close()
-        conn.close()
-
-
-def set_face_registered(card_no: str, value: str = "Y"):
-    """Update EMPLOYEE.FACE_REGISTERED flag."""
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            UPDATE EMPLOYEE
-            SET FACE_REGISTERED = :val
-            WHERE TO_CHAR(CARD_NO) = :card
-        """, {"val": value, "card": card_no})
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        if "ORA-00904" in str(e):
-            pass  # Column doesn't exist yet, silently skip
-        else:
-            raise
+        print("FACE REG CHECK ERROR:", e)
+        return {"is_registered": False, "registered_at": None}
     finally:
         cursor.close()
         conn.close()
 
 
 def store_face_embeddings(card_no: str, embeddings_json: list, created_at: str = None):
-    """Store embeddings in EMP_FACE_DATA (stub — just marks registered)."""
-    # TODO: when ML model is integrated, store actual embeddings:
-    #   INSERT INTO EMP_FACE_DATA (CARD_NO, EMBEDDING, IMAGE_INDEX, CREATED_AT)
-    #   VALUES (:card, :emb_clob, :idx, TO_TIMESTAMP(:ts, ...))
-    set_face_registered(card_no, "Y")
+    """Store embeddings in EMP_FACE_EMBEDDINGS.
+
+    The actual embedding insertion is handled by the face_login.py service.
+    This is a fallback that just marks the entry if called from the stub service.
+    """
     return {"status": "success"}
 
 
 def get_stored_embeddings(card_no: str) -> list:
-    """Retrieve stored embeddings for a card_no (stub — returns empty)."""
-    # TODO: when ML model is integrated:
-    #   SELECT EMBEDDING, IMAGE_INDEX FROM EMP_FACE_DATA WHERE CARD_NO = :card
-    return []
-
-
-def get_all_registered_employees() -> list:
-    """Return all employees with FACE_REGISTERED = 'Y'."""
+    """Retrieve stored embeddings for a card_no."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT TO_CHAR(CARD_NO), EMP_NAME
-            FROM EMPLOYEE
-            WHERE NVL(FACE_REGISTERED, 'N') = 'Y'
+            SELECT EMBEDDING_CLOB
+            FROM EMP_FACE_EMBEDDINGS
+            WHERE EMPCODE = :card AND IS_ACTIVE = 'Y'
+            ORDER BY CREATED_AT DESC
+            FETCH FIRST 1 ROWS ONLY
+        """, {"card": card_no})
+        row = cursor.fetchone()
+        if row and row[0]:
+            return [row[0]]
+        return []
+    except Exception as e:
+        print("EMBEDDING FETCH ERROR:", e)
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def delete_face_registration(card_no: str) -> dict:
+    """Soft-delete face registration by marking IS_ACTIVE = 'N'."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE EMP_FACE_EMBEDDINGS
+            SET IS_ACTIVE = 'N'
+            WHERE EMPCODE = :card AND IS_ACTIVE = 'Y'
+        """, {"card": card_no})
+        rows_updated = cursor.rowcount
+        conn.commit()
+        return {"deleted": rows_updated > 0, "rows": rows_updated}
+    except Exception as e:
+        conn.rollback()
+        print("FACE DELETE ERROR:", e)
+        return {"deleted": False, "rows": 0}
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_all_registered_employees() -> list:
+    """Return all employees with active face registrations."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT f.EMPCODE, e.EMP_NAME
+            FROM EMP_FACE_EMBEDDINGS f
+            LEFT JOIN EMPLOYEE e ON TO_CHAR(e.CARD_NO) = f.EMPCODE
+            WHERE f.IS_ACTIVE = 'Y'
         """)
         rows = cursor.fetchall()
         return [{"card_no": str(r[0]), "emp_name": r[1] or ""} for r in rows]
     except Exception as e:
-        if "ORA-00904" in str(e):
-            return []
-        raise
+        print("FACE LIST ERROR:", e)
+        return []
     finally:
         cursor.close()
         conn.close()

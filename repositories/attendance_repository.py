@@ -64,16 +64,21 @@ def get_today_record(card_no: str):
     """
     conn = get_connection()
     cursor = conn.cursor()
+    # Also try integer part of card_no (e.g. "100002" for card "100002.1")
+    card_int = card_no.split(".")[0] if "." in card_no else card_no
     try:
         # ---- 1. Try DUTY_ROSTER ----
+        # Match by CARD_NO as NUMBER (handles both 100002 and 100002.1 formats)
+        card_num = float(card_int) if card_int.isdigit() else None
         cursor.execute("""
             SELECT DUTY_ROSTER_PK, IN_TIME, OUT_TIME, CARD_NO
             FROM DUTY_ROSTER
-            WHERE CARD_NO = :card
+            WHERE (TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int
+                   OR (:card_num IS NOT NULL AND CARD_NO = :card_num))
               AND TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
             ORDER BY DUTY_ROSTER_PK DESC
             FETCH FIRST 1 ROWS ONLY
-        """, {"card": card_no})
+        """, {"card": card_no, "card_int": card_int, "card_num": card_num})
         row = cursor.fetchone()
         if row:
             return {
@@ -116,13 +121,19 @@ def get_today_record(card_no: str):
 # LOOK UP EMP_FK (EMPCODE) from EMPLOYEE table for a given CARD_NO
 # ------------------------------------------------------------------
 
+def _card_int(card_no: str) -> str:
+    """Return integer part of card_no (e.g. '100002' from '100002.1')."""
+    return card_no.split(".")[0] if "." in card_no else card_no
+
+
 def _get_empcode(card_no: str) -> str:
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT EMPCODE FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
-        """, {"card": card_no})
+            SELECT EMPCODE FROM EMPLOYEE
+            WHERE TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int
+        """, {"card": card_no, "card_int": _card_int(card_no)})
         row = cursor.fetchone()
         return row[0] if row else card_no
     finally:
@@ -131,13 +142,14 @@ def _get_empcode(card_no: str) -> str:
 
 
 def _get_emp_fk(card_no: str):
-    """Get numeric EMP_FK for DUTY_ROSTER from EMPLOYEE table."""
+    """Get numeric EMP_FK (EMP_PK) for DUTY_ROSTER from EMPLOYEE table."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT EMP_PK FROM EMPLOYEE WHERE TO_CHAR(CARD_NO) = :card
-        """, {"card": card_no})
+            SELECT EMP_PK FROM EMPLOYEE
+            WHERE TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int
+        """, {"card": card_no, "card_int": _card_int(card_no)})
         row = cursor.fetchone()
         return row[0] if row else None
     finally:
@@ -153,8 +165,8 @@ def _get_compc_brnch(card_no: str):
         cursor.execute("""
             SELECT NVL(COMPC, 1), NVL(BRNCH, 1)
             FROM EMPLOYEE
-            WHERE TO_CHAR(CARD_NO) = :card
-        """, {"card": card_no})
+            WHERE TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int
+        """, {"card": card_no, "card_int": _card_int(card_no)})
         row = cursor.fetchone()
         return (row[0], row[1]) if row else (1, 1)
     except Exception:
@@ -178,55 +190,54 @@ def insert_check_in(card_no: str, empcode: str, *,
     cursor = conn.cursor()
     try:
         now = _now_hhmm()
+        ci = _card_int(card_no)
 
-        # ---- 1. DUTY_ROSTER ----
-        cursor.execute("""
-            SELECT DUTY_ROSTER_PK
-            FROM DUTY_ROSTER
-            WHERE CARD_NO = :card
-              AND TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
-            ORDER BY DUTY_ROSTER_PK DESC
-            FETCH FIRST 1 ROWS ONLY
-        """, {"card": card_no})
-        existing = cursor.fetchone()
-
-        if existing:
-            cursor.execute("""
-                UPDATE DUTY_ROSTER
-                SET IN_TIME = :in_time,
-                    ATT_MRK_TM = :att_mrk,
-                    STATUS = 'Present'
-                WHERE DUTY_ROSTER_PK = :pk
-            """, {"in_time": now, "att_mrk": now, "pk": existing[0]})
-        else:
+        # ---- 1. DUTY_ROSTER — MERGE handles pre-generated rows and new inserts ----
+        try:
             emp_fk = _get_emp_fk(card_no)
             compc, brnch = _get_compc_brnch(card_no)
             today = datetime.now()
             day_name = today.strftime("%A")
             roster_month = today.strftime("%b-%Y").upper()
 
+            # MERGE matches on (ROSTER_DATE, CARD_NO) — same as DUTY_ROSTER_UK1.
+            # Updates the pre-generated roster row if it exists; inserts otherwise.
             cursor.execute("""
-                INSERT INTO DUTY_ROSTER (
-                    EMP_FK, CARD_NO, ROSTER_DATE,
-                    IN_TIME, STATUS, DAY_NAME, ROSTER_MONTH,
-                    ATT_MRK_TM, COMPC, BRNCH, ABSENT_DAYS
-                ) VALUES (
-                    :emp_fk, :card, TRUNC(SYSDATE),
-                    :in_time, 'Present', :day_name, :roster_month,
-                    :att_mrk, :compc, :brnch, 0
-                )
+                MERGE INTO DUTY_ROSTER dr
+                USING (SELECT TRUNC(SYSDATE) AS rdate,
+                              :card_num AS cno
+                       FROM DUAL) src
+                ON (TRUNC(dr.ROSTER_DATE) = src.rdate
+                    AND dr.CARD_NO = src.cno)
+                WHEN MATCHED THEN
+                    UPDATE SET dr.IN_TIME    = :in_time,
+                               dr.STATUS     = 'Present',
+                               dr.ATT_MRK_TM = :att_mrk
+                WHEN NOT MATCHED THEN
+                    INSERT (DUTY_ROSTER_PK, EMP_FK, CARD_NO, ROSTER_DATE,
+                            IN_TIME, STATUS, DAY_NAME, ROSTER_MONTH,
+                            ATT_MRK_TM, COMPC, BRNCH, ABSENT_DAYS)
+                    VALUES (
+                        (SELECT NVL(MAX(DUTY_ROSTER_PK), 0) + 1 FROM DUTY_ROSTER),
+                        :emp_fk, :card_num, TRUNC(SYSDATE),
+                        :in_time, 'Present', :day_name, :roster_month,
+                        :att_mrk, :compc, :brnch, 0
+                    )
             """, {
-                "emp_fk": emp_fk or card_no,
-                "card": card_no,
+                "card_num": float(ci),
                 "in_time": now,
+                "att_mrk": now,
+                "emp_fk": emp_fk,
                 "day_name": day_name,
                 "roster_month": roster_month,
-                "att_mrk": now,
                 "compc": compc,
                 "brnch": brnch,
             })
+            print(f"[CHECK_IN] MERGE DUTY_ROSTER card={card_no} IN_TIME={now}")
+        except Exception as dr_err:
+            print(f"[DUTY_ROSTER] CHECK_IN failed (non-fatal): {dr_err}")
 
-        # ---- 2. ATTENDANCE_RECORDS ----
+        # ---- 2. ATTENDANCE_RECORDS (canonical store) ----
         try:
             cursor.execute("""
                 INSERT INTO ATTENDANCE_RECORDS (
@@ -274,6 +285,7 @@ def insert_check_in(card_no: str, empcode: str, *,
         }
     except Exception as e:
         conn.rollback()
+        print(f"[CHECK_IN] Fatal error for card={card_no}: {e}")
         return {"status": "error", "message": str(e)}
     finally:
         cursor.close()
@@ -306,34 +318,38 @@ def update_check_out(record_id: int, entry_time: str, card_no: str = None,
 
         # ---- 2. ATTENDANCE_RECORDS — update today's row ----
         if card_no:
+            card_int = card_no.split(".")[0] if "." in card_no else card_no
             try:
                 cursor.execute("""
                     UPDATE ATTENDANCE_RECORDS
                     SET EXIT_TIME   = :exit_time,
                         TIME_SPENT  = :time_spent
-                    WHERE CARD_NO = :card_no
+                    WHERE (CARD_NO = :card_no OR CARD_NO = :card_int)
                       AND TRUNC(ATTENDANCE_DATE) = TRUNC(SYSDATE)
                       AND EXIT_TIME IS NULL
                 """, {
                     "exit_time": now,
                     "time_spent": spent,
                     "card_no": card_no,
+                    "card_int": card_int,
                 })
             except Exception as ar_err:
                 print(f"[ATTENDANCE_RECORDS] UPDATE failed (non-fatal): {ar_err}")
 
         # If record came from ATTENDANCE_RECORDS only, also try to update DUTY_ROSTER by card_no
         if source == "attendance_records" and card_no:
+            card_int = card_no.split(".")[0] if "." in card_no else card_no
             try:
                 cursor.execute("""
                     UPDATE DUTY_ROSTER
                     SET OUT_TIME = :out_time,
                         W_HRS    = :w_hrs,
                         W_MNT    = :w_mnt
-                    WHERE CARD_NO = :card
+                    WHERE (TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int)
                       AND TRUNC(ROSTER_DATE) = TRUNC(SYSDATE)
                       AND OUT_TIME IS NULL
-                """, {"out_time": now, "w_hrs": w_hrs, "w_mnt": w_mnt, "card": card_no})
+                """, {"out_time": now, "w_hrs": w_hrs, "w_mnt": w_mnt,
+                      "card": card_no, "card_int": card_int})
             except Exception as dr_err:
                 print(f"[DUTY_ROSTER] UPDATE by card_no failed (non-fatal): {dr_err}")
 
@@ -381,11 +397,12 @@ def get_attendance_report(card_no: str, date_str: str):
                 NVL(LATE_MNT, 0)                AS late_mnt,
                 NVL(OT_HRS, 0)                  AS ot_hrs,
                 NVL(OT_MNT, 0)                  AS ot_mnt,
-                ROSTER_REMARKS                  AS roster_remarks
+                ROSTER_REMARKS                  AS roster_remarks,
+                DAY_NAME                        AS day_name
             FROM DUTY_ROSTER
-            WHERE CARD_NO = :card
+            WHERE (TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int)
               AND TRUNC(ROSTER_DATE) = TO_DATE(:dt, 'DD-MON-YYYY')
-        """, {"card": card_no, "dt": date_str})
+        """, {"card": card_no, "card_int": _card_int(card_no), "dt": date_str})
 
         rows = cursor.fetchall()
         columns = [col[0].lower() for col in cursor.description]
@@ -422,6 +439,7 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
     cursor = conn.cursor()
     try:
         # ---- Try ATTENDANCE_RECORDS first ----
+        card_int = _card_int(card_no)
         try:
             cursor.execute("""
                 SELECT
@@ -444,13 +462,14 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
                     0                       AS late_mnt,
                     0                       AS ot_hrs,
                     0                       AS ot_mnt,
-                    ADDRESS                 AS roster_remarks
+                    ADDRESS                 AS roster_remarks,
+                    NULL                    AS day_name
                 FROM ATTENDANCE_RECORDS
-                WHERE CARD_NO = :card
+                WHERE (CARD_NO = :card OR CARD_NO = :card_int)
                   AND TRUNC(ATTENDANCE_DATE) BETWEEN
                       TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
                 ORDER BY ATTENDANCE_DATE
-            """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+            """, {"card": card_no, "card_int": card_int, "from_d": from_date, "to_d": to_date})
 
             rows = cursor.fetchall()
             if rows:
@@ -469,6 +488,7 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
                 pass
 
         # ---- Fallback: DUTY_ROSTER ----
+        card_int = _card_int(card_no)
         cursor2 = conn.cursor()
         try:
             cursor2.execute("""
@@ -488,13 +508,14 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
                     NVL(LATE_MNT, 0)                AS late_mnt,
                     NVL(OT_HRS, 0)                  AS ot_hrs,
                     NVL(OT_MNT, 0)                  AS ot_mnt,
-                    ROSTER_REMARKS                  AS roster_remarks
+                    ROSTER_REMARKS                  AS roster_remarks,
+                    DAY_NAME                        AS day_name
                 FROM DUTY_ROSTER
-                WHERE CARD_NO = :card
+                WHERE (TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int)
                   AND TRUNC(ROSTER_DATE) BETWEEN
                       TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
                 ORDER BY ROSTER_DATE
-            """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+            """, {"card": card_no, "card_int": card_int, "from_d": from_date, "to_d": to_date})
 
             rows = cursor2.fetchall()
             columns = [col[0].lower() for col in cursor2.description]
@@ -529,6 +550,7 @@ def get_attendance_summary(card_no: str, from_date: str, to_date: str):
     cursor = conn.cursor()
     try:
         # ---- Try ATTENDANCE_RECORDS first ----
+        card_int = _card_int(card_no)
         try:
             cursor.execute("""
                 SELECT
@@ -542,10 +564,10 @@ def get_attendance_summary(card_no: str, from_date: str, to_date: str):
                     0                                                            AS overtime_minutes,
                     0                                                            AS absent_days
                 FROM ATTENDANCE_RECORDS
-                WHERE CARD_NO = :card
+                WHERE (CARD_NO = :card OR CARD_NO = :card_int)
                   AND TRUNC(ATTENDANCE_DATE) BETWEEN
                       TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
-            """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+            """, {"card": card_no, "card_int": card_int, "from_d": from_date, "to_d": to_date})
             row = cursor.fetchone()
             if row and row[0] and row[0] > 0:
                 columns = [col[0].lower() for col in cursor.description]
@@ -555,6 +577,7 @@ def get_attendance_summary(card_no: str, from_date: str, to_date: str):
             print(f"[ATTENDANCE_SUMMARY] ATTENDANCE_RECORDS query failed: {e}")
 
         # ---- Fallback: DUTY_ROSTER ----
+        card_int = _card_int(card_no)
         cursor2 = conn.cursor()
         try:
             cursor2.execute("""
@@ -569,10 +592,10 @@ def get_attendance_summary(card_no: str, from_date: str, to_date: str):
                     NVL(SUM(NVL(OT_HRS, 0) * 60 + NVL(OT_MNT, 0)), 0) AS overtime_minutes,
                     NVL(SUM(NVL(ABSENT_DAYS, 0)), 0) AS absent_days
                 FROM DUTY_ROSTER
-                WHERE CARD_NO = :card
+                WHERE (TO_CHAR(CARD_NO) = :card OR TO_CHAR(CARD_NO) = :card_int)
                   AND TRUNC(ROSTER_DATE) BETWEEN
                       TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
-            """, {"card": card_no, "from_d": from_date, "to_d": to_date})
+            """, {"card": card_no, "card_int": card_int, "from_d": from_date, "to_d": to_date})
 
             row = cursor2.fetchone()
             if not row:

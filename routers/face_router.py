@@ -9,7 +9,7 @@ Matches the Flutter FaceRemoteDataSourceImpl which calls:
 from fastapi import APIRouter, HTTPException
 
 from models.face_models import FaceRegisterRequest, FaceVerifyRequest, FaceIdentifyRequest
-from services.face_service import register_face, verify_face, check_face_status, identify_face
+from services.face_service import register_face, verify_face, check_face_status, identify_face, delete_face
 
 router = APIRouter(prefix="/face", tags=["Face Authentication"])
 
@@ -79,5 +79,18 @@ def face_status(card_no: str):
             "has_face": result["is_registered"],
             "card_no": card_no,
             "registered_at": result.get("registered_at"),
+        }
+    }
+
+
+@router.delete("/delete/{card_no}")
+def face_delete(card_no: str):
+    result = delete_face(card_no)
+    return {
+        "body": {
+            "status": result["status"],
+            "deleted": result["deleted"],
+            "msg": result["msg"],
+            "card_no": card_no,
         }
     }

@@ -38,7 +38,7 @@ def get_user_by_login(login: str):
                     "card_no": card_no,
                     "user_paswd": row[1],
                     "emp_name": row[2] or "",
-                    "hr_admin": row[3] or "N",
+                    "hr_admin": str(row[3] or "N").strip().upper(),
                     "empcode": row[4] or "",
                 }
         except Exception as e:
@@ -201,7 +201,7 @@ def get_user_profile(card_no: str):
                 e.date_of_birth,
                 e.date_of_join,
                 e.department,
-                e.designation,       
+                e.designation,
                 e.nic_no,
                 e.nic_exp_date,
                 e.eobi_no,
@@ -216,8 +216,11 @@ def get_user_profile(card_no: str):
                 e.hod1,
                 codename('HOD', e.hod1, null) hod1nm,
                 e.hod2,
-                codename('HOD', e.hod2, null) hod2nm
+                codename('HOD', e.hod2, null) hod2nm,
+                h.EMPCODE AS emp_code,
+                h.STATUS AS emp_status
             FROM EMPLOYEE e
+            LEFT JOIN HR_EMP_MASTER h ON h.EMPCODE = e.EMPCODE
             WHERE e.card_no = :card
         """, {"card": card_no})
 
@@ -290,6 +293,29 @@ def apply_leave(card_no: str,
     d1 = datetime.strptime(from_date, "%Y-%m-%d")
     d2 = datetime.strptime(to_date, "%Y-%m-%d")
     leave_days = (d2 - d1).days + 1
+
+    # Validate leave balance before inserting
+    try:
+        cursor.execute("""
+            SELECT balance FROM ALL_LEAVE_BAL_V
+            WHERE card_no = :card AND leave_type = :lt
+        """, {"card": card_no, "lt": leave_type_id})
+        bal_row = cursor.fetchone()
+        current_balance = float(bal_row[0]) if bal_row else 0
+        if current_balance <= 0:
+            cursor.close()
+            conn.close()
+            return {"status": "error", "message": "No remaining balance for this leave type."}
+        if leave_days > current_balance:
+            cursor.close()
+            conn.close()
+            return {
+                "status": "error",
+                "message": f"Insufficient balance. Available: {current_balance}, Requested: {leave_days}",
+            }
+    except Exception as e:
+        print(f"[LEAVE] Balance check warning: {e}")
+        # Continue if view doesn't exist — let insert proceed
 
     try:
         cursor.execute("""
