@@ -437,6 +437,9 @@ def get_dashboard(card_no: str):
     conn = get_connection()
     cursor = conn.cursor()
     try:
+        # Use MAX() correlated subqueries instead of codename() to avoid ORA-01427
+        # (codename uses SELECT..INTO which fails when the lookup table has duplicate rows).
+        # ALL_LEAVE_BAL_V is also pulled as a subquery to prevent row-multiplication.
         cursor.execute("""
             SELECT
                 e.emp_pk,
@@ -447,15 +450,14 @@ def get_dashboard(card_no: str):
                 e.nic_no,
                 e.designation,
                 e.department,
-                codename('COMPC', e.compc, null) compcnm,
+                (SELECT MAX(ci.DESCR) FROM COMPANY_INFO ci WHERE ci.COMPC = e.compc) compcnm,
                 e.compc,
                 e.brnch AS branch,
-                codename('BRNCH', e.brnch, null) brnchnm,
+                (SELECT MAX(cl.DESCR) FROM COM_LOCATION cl WHERE cl.LCODE = e.brnch) brnchnm,
                 e.hod1 AS hod,
-                codename('HOD', e.hod1, null) hod_nm,
-                b.balance
+                (SELECT MAX(h.NAME) FROM HR_EMP_MASTER h WHERE h.EMPCODE = TO_CHAR(e.hod1)) hod_nm,
+                (SELECT SUM(b.balance) FROM ALL_LEAVE_BAL_V b WHERE b.card_no = e.card_no) balance
             FROM EMPLOYEE e
-            LEFT JOIN ALL_LEAVE_BAL_V b ON e.card_no = b.card_no
             WHERE e.card_no = :card
         """, {"card": card_no})
 
@@ -499,7 +501,7 @@ def get_user_profile(card_no: str):
                 e.email_address,
                 e.address,
                 e.mobile_no,
-                codename('SEX', e.emp_pk, null) gender,
+                e.sex AS gender,
                 e.date_of_birth,
                 e.date_of_join,
                 e.department,
@@ -512,13 +514,13 @@ def get_user_profile(card_no: str):
                 e.type,
                 e.card_no,
                 e.compc,
-                codename('COMPC', e.compc, null) compcnm,
+                (SELECT MAX(ci.DESCR) FROM COMPANY_INFO ci WHERE ci.COMPC = e.compc) compcnm,
                 e.brnch,
-                codename('BRNCH', e.brnch, null) brnchnm,
+                (SELECT MAX(cl.DESCR) FROM COM_LOCATION cl WHERE cl.LCODE = e.brnch) brnchnm,
                 e.hod1,
-                codename('HOD', e.hod1, null) hod1nm,
+                (SELECT MAX(h2.NAME) FROM HR_EMP_MASTER h2 WHERE h2.EMPCODE = TO_CHAR(e.hod1)) hod1nm,
                 e.hod2,
-                codename('HOD', e.hod2, null) hod2nm,
+                (SELECT MAX(h3.NAME) FROM HR_EMP_MASTER h3 WHERE h3.EMPCODE = TO_CHAR(e.hod2)) hod2nm,
                 h.EMPCODE AS emp_code,
                 h.STATUS AS emp_status
             FROM EMPLOYEE e
