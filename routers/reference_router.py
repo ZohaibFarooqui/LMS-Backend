@@ -11,6 +11,7 @@ from core.dependencies import require_hr_admin
 from repositories.reference_repository import (
     get_departments, get_grades, get_designations, get_shifts,
     get_blood_groups, get_cadre, get_units, get_religions, get_reporting_officers,
+    get_locations, add_location, update_location,
     add_department, add_grade, add_designation, add_shift,
     add_blood_group, add_cadre, add_unit,
 )
@@ -65,6 +66,11 @@ def list_religions():
 @router.get("/reporting-officers")
 def list_reporting_officers():
     return {"items": get_reporting_officers()}
+
+
+@router.get("/locations")
+def list_locations():
+    return {"items": get_locations()}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -171,6 +177,36 @@ def create_unit(req: AddUnitRequest, admin_card_no: str = Query(...)):
     if not req.unit_name.strip():
         raise HTTPException(status_code=400, detail="Unit name is required")
     result = add_unit(req.unit_name)
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+class LocationRequest(BaseModel):
+    lcode: str
+    descr: str
+    sname: Optional[str] = None
+    regioncode: Optional[str] = ""
+    city: Optional[str] = ""
+
+
+@router.post("/locations")
+def create_location(req: LocationRequest, admin_card_no: str = Query(...)):
+    require_hr_admin(admin_card_no)
+    if not req.lcode.strip() or not req.descr.strip():
+        raise HTTPException(status_code=400, detail="Location code and description are required")
+    result = add_location(req.lcode, req.descr, req.sname or req.descr, req.regioncode or "", req.city or "")
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["message"])
+    return result
+
+
+@router.put("/locations/{lcode}")
+def edit_location(lcode: str, req: LocationRequest, admin_card_no: str = Query(...)):
+    require_hr_admin(admin_card_no)
+    if not req.descr.strip():
+        raise HTTPException(status_code=400, detail="Description is required")
+    result = update_location(lcode, req.descr, req.sname or req.descr, req.regioncode or "", req.city or "")
     if result["status"] == "error":
         raise HTTPException(status_code=400, detail=result["message"])
     return result

@@ -11,12 +11,28 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class CompanyItem(BaseModel):
+    code: str
+    name: str
+
+
+class BranchItem(BaseModel):
+    code: str
+    name: str
+
+
 class LoginResponse(BaseModel):
     status: str
     card_no: str
     emp_name: str = ""
     face_registered: bool = False
     hr_admin: bool = False
+    has_self_service: bool = True
+    has_employee_features: bool = True  # True if user is in HR_EMP_MASTER (can access employee modules)
+    allowed_companies: List[str] = []
+    allowed_branches: List[str] = []
+    company_list: List[CompanyItem] = []
+    branch_list: List[BranchItem] = []
 
 
 class ChangePasswordRequest(BaseModel):

@@ -118,7 +118,8 @@ def get_employee_by_empcode(empcode: str) -> dict | None:
                 HR_ADMIN, RPT_OFFICER, MARSTAT,
                 GRADE_CD, RELIGION,
                 HOD1, HOD2, HOD3,
-                BASIC, GROSS, SHIFT, W_HOUR
+                BASIC, GROSS, SHIFT, W_HOUR,
+                TRACK_LOCATION, TRACK_LOCATION_HR
             FROM HR_EMP_MASTER
             WHERE EMPCODE = :empcode
         """, {"empcode": empcode})
@@ -154,6 +155,7 @@ def update_employee(empcode: str, data: dict) -> dict:
         "hod1": "HOD1", "hod2": "HOD2", "hod3": "HOD3",
         "basic": "BASIC", "gross": "GROSS", "shift": "SHIFT",
         "w_hour": "W_HOUR", "bldgrp": "BLDGRP", "location": "LOCATION",
+        "track_location": "TRACK_LOCATION", "track_location_hr": "TRACK_LOCATION_HR",
     }
     date_fields = {"dtofbrth": "DTOFBRTH", "dtofappt": "DTOFAPPT"}
 
@@ -198,26 +200,48 @@ def update_employee(empcode: str, data: dict) -> dict:
 # SEARCH EMPLOYEES
 # ------------------------------------------------------------------
 
-def search_employees_hrms(query: str) -> list:
+def search_employees_hrms(query: str, allowed_companies=None, allowed_branches=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
         search = f"%{query.upper()}%"
+        params = {"q": search}
+
+        filter_parts = []
+        if allowed_companies:
+            nums = [int(c) for c in allowed_companies if str(c).strip().isdigit()]
+            if nums:
+                ph = ", ".join(f":cmpf{i}" for i in range(len(nums)))
+                filter_parts.append(f"TO_NUMBER(h.UNIT_ID) IN ({ph})")
+                for i, n in enumerate(nums):
+                    params[f"cmpf{i}"] = n
+        if allowed_branches:
+            nums = [int(b) for b in allowed_branches if str(b).strip().isdigit()]
+            if nums:
+                ph = ", ".join(f":brnf{i}" for i in range(len(nums)))
+                filter_parts.append(f"TO_NUMBER(h.LOCATION) IN ({ph})")
+                for i, n in enumerate(nums):
+                    params[f"brnf{i}"] = n
+
+        filter_sql = (" AND " + " AND ".join(filter_parts)) if filter_parts else ""
+
         cursor.execute("""
             SELECT
                 h.EMPCODE, h.NAME, h.FHNAME, h."ATDTCARD#",
                 h.DEPT_NO, h.DESG_CD, h."MOBILE#", h.EMAIL,
                 h.STATUS, h.HR_ADMIN, h.UNIT_ID,
-                TO_CHAR(e.CARD_NO) AS CARD_NO
+                TO_CHAR(e.CARD_NO) AS CARD_NO,
+                h.SEX, h.LOCATION,
+                h.TRACK_LOCATION, h.TRACK_LOCATION_HR
             FROM HR_EMP_MASTER h
             LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
-            WHERE UPPER(h.NAME) LIKE :q
+            WHERE (UPPER(h.NAME) LIKE :q
                OR h.EMPCODE LIKE :q
                OR h."ATDTCARD#" LIKE :q
-               OR h."MOBILE#" LIKE :q
+               OR h."MOBILE#" LIKE :q)""" + filter_sql + """
             ORDER BY h.NAME
             FETCH FIRST 50 ROWS ONLY
-        """, {"q": search})
+        """, params)
         rows = cursor.fetchall()
         columns = [col[0].lower() for col in cursor.description]
         results = []
@@ -232,8 +256,8 @@ def search_employees_hrms(query: str) -> list:
         conn.close()
 
 
-def list_employees_hrms(status: str = None) -> list:
-    """Return all employees, optionally filtered by status (A/I/L)."""
+def list_employees_hrms(status: str = None, allowed_companies=None, allowed_branches=None) -> list:
+    """Return all employees, optionally filtered by status (A/I/L) and company/branch."""
     conn = get_connection()
     cursor = conn.cursor()
     _BASE_SELECT = """
@@ -242,26 +266,51 @@ def list_employees_hrms(status: str = None) -> list:
                     h.DEPT_NO, h.DESG_CD, h."MOBILE#", h.EMAIL,
                     h.STATUS, h.HR_ADMIN, h.UNIT_ID,
                     TO_CHAR(e.CARD_NO) AS CARD_NO,
-                    h.SEX, h.LOCATION
+                    h.SEX, h.LOCATION,
+                    h.TRACK_LOCATION, h.TRACK_LOCATION_HR
                 FROM HR_EMP_MASTER h
                 LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
             """
     try:
+        params = {}
+        filter_parts = []
+        if allowed_companies:
+            nums = [int(c) for c in allowed_companies if str(c).strip().isdigit()]
+            if nums:
+                ph = ", ".join(f":cmpf{i}" for i in range(len(nums)))
+                filter_parts.append(f"TO_NUMBER(h.UNIT_ID) IN ({ph})")
+                for i, n in enumerate(nums):
+                    params[f"cmpf{i}"] = n
+        if allowed_branches:
+            nums = [int(b) for b in allowed_branches if str(b).strip().isdigit()]
+            if nums:
+                ph = ", ".join(f":brnf{i}" for i in range(len(nums)))
+                filter_parts.append(f"TO_NUMBER(h.LOCATION) IN ({ph})")
+                for i, n in enumerate(nums):
+                    params[f"brnf{i}"] = n
+
+        filter_sql = (" AND " + " AND ".join(filter_parts)) if filter_parts else ""
+
         if status == "I":
-            # 'D' (Disabled/Deactivated) is treated as Inactive
-            cursor.execute(_BASE_SELECT + """
-                WHERE h.STATUS IN ('I', 'D')
-                ORDER BY h.NAME FETCH FIRST 500 ROWS ONLY
-            """)
+            cursor.execute(_BASE_SELECT + f"""
+                WHERE h.STATUS IN ('I', 'D'){filter_sql}
+                ORDER BY h.NAME FETCH FIRST 2000 ROWS ONLY
+            """, params)
         elif status in ("A", "L"):
-            cursor.execute(_BASE_SELECT + """
-                WHERE h.STATUS = :status
-                ORDER BY h.NAME FETCH FIRST 500 ROWS ONLY
-            """, {"status": status})
+            cursor.execute(_BASE_SELECT + f"""
+                WHERE h.STATUS = :status{filter_sql}
+                ORDER BY h.NAME FETCH FIRST 2000 ROWS ONLY
+            """, {"status": status, **params})
         else:
-            cursor.execute(_BASE_SELECT + """
-                ORDER BY h.NAME FETCH FIRST 500 ROWS ONLY
-            """)
+            if filter_parts:
+                cursor.execute(_BASE_SELECT + f"""
+                    WHERE {" AND ".join(filter_parts)}
+                    ORDER BY h.NAME FETCH FIRST 2000 ROWS ONLY
+                """, params)
+            else:
+                cursor.execute(_BASE_SELECT + """
+                    ORDER BY h.NAME FETCH FIRST 2000 ROWS ONLY
+                """)
         rows = cursor.fetchall()
         columns = [col[0].lower() for col in cursor.description]
         results = []
@@ -307,42 +356,51 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
         incomplete = 0
         on_leave = 0
 
+        # Present count: union of DUTY_ROSTER + ATTENDANCE_RECORDS to catch all check-ins
+        try:
+            cursor.execute("""
+                SELECT COUNT(DISTINCT card_no) FROM (
+                    SELECT TO_CHAR(CARD_NO) AS card_no
+                    FROM DUTY_ROSTER
+                    WHERE TRUNC(ROSTER_DATE) = {td} AND IN_TIME IS NOT NULL
+                    UNION
+                    SELECT TO_CHAR(CARD_NO) AS card_no
+                    FROM ATTENDANCE_RECORDS
+                    WHERE TRUNC(ATTENDANCE_DATE) = {td} AND ENTRY_TIME IS NOT NULL
+                )
+            """.format(td=td))
+            present = int(cursor.fetchone()[0] or 0)
+        except Exception as e:
+            print(f"[HR_DASHBOARD] Present count query failed: {e}")
+
+        # Late, on_leave, incomplete from DUTY_ROSTER; fallback incomplete from ATTENDANCE_RECORDS
         try:
             cursor.execute("""
                 SELECT
-                    SUM(CASE WHEN IN_TIME IS NOT NULL THEN 1 ELSE 0 END) AS present,
-                    SUM(CASE WHEN IN_TIME IS NOT NULL AND OUT_TIME IS NULL THEN 1 ELSE 0 END) AS incomplete,
-                    SUM(CASE WHEN NVL(LATE_HRS, 0) > 0 OR NVL(LATE_MNT, 0) > 0 THEN 1 ELSE 0 END) AS late,
-                    SUM(CASE WHEN UPPER(STATUS) LIKE '%LEAVE%' THEN 1 ELSE 0 END) AS on_leave
+                    SUM(CASE WHEN IN_TIME IS NOT NULL AND OUT_TIME IS NULL THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN NVL(LATE_HRS, 0) > 0 OR NVL(LATE_MNT, 0) > 0 THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN UPPER(STATUS) LIKE '%LEAVE%' THEN 1 ELSE 0 END)
                 FROM DUTY_ROSTER
                 WHERE TRUNC(ROSTER_DATE) = {td}
             """.format(td=td))
             row = cursor.fetchone()
             if row:
-                present = int(row[0] or 0)
-                incomplete = int(row[1] or 0)
-                late = int(row[2] or 0)
-                on_leave = int(row[3] or 0)
+                incomplete = int(row[0] or 0)
+                late = int(row[1] or 0)
+                on_leave = int(row[2] or 0)
         except Exception as e:
-            print(f"[HR_DASHBOARD] DUTY_ROSTER query failed: {e}")
-
-            # Fallback: try ATTENDANCE_RECORDS
+            print(f"[HR_DASHBOARD] DUTY_ROSTER stats failed: {e}")
             try:
-                cursor2 = conn.cursor()
-                cursor2.execute("""
-                    SELECT
-                        COUNT(DISTINCT CARD_NO) AS present,
-                        SUM(CASE WHEN ENTRY_TIME IS NOT NULL AND EXIT_TIME IS NULL THEN 1 ELSE 0 END) AS incomplete
+                cursor.execute("""
+                    SELECT SUM(CASE WHEN ENTRY_TIME IS NOT NULL AND EXIT_TIME IS NULL THEN 1 ELSE 0 END)
                     FROM ATTENDANCE_RECORDS
                     WHERE TRUNC(ATTENDANCE_DATE) = {td}
                 """.format(td=td))
-                row2 = cursor2.fetchone()
-                if row2:
-                    present = int(row2[0] or 0)
-                    incomplete = int(row2[1] or 0)
-                cursor2.close()
-            except Exception as e2:
-                print(f"[HR_DASHBOARD] ATTENDANCE_RECORDS fallback failed: {e2}")
+                r = cursor.fetchone()
+                if r:
+                    incomplete = int(r[0] or 0)
+            except Exception:
+                pass
 
         absent = max(total_employees - present - on_leave, 0)
 
@@ -353,13 +411,18 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
                 SELECT
                     NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown')) AS dept,
                     COUNT(*) AS total,
-                    SUM(CASE WHEN d.IN_TIME IS NOT NULL THEN 1 ELSE 0 END) AS present
+                    SUM(CASE WHEN d.IN_TIME IS NOT NULL OR ar.card_no IS NOT NULL THEN 1 ELSE 0 END) AS present
                 FROM HR_EMP_MASTER h
                 LEFT JOIN HR_DEPT dep ON dep.DEPT_NO = h.DEPT_NO
                 LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
                 LEFT JOIN DUTY_ROSTER d
-                    ON d.CARD_NO = e.CARD_NO
+                    ON TO_CHAR(d.CARD_NO) = TO_CHAR(e.CARD_NO)
                     AND TRUNC(d.ROSTER_DATE) = {td}
+                LEFT JOIN (
+                    SELECT DISTINCT TO_CHAR(CARD_NO) AS card_no
+                    FROM ATTENDANCE_RECORDS
+                    WHERE TRUNC(ATTENDANCE_DATE) = {td} AND ENTRY_TIME IS NOT NULL
+                ) ar ON ar.card_no = TO_CHAR(e.CARD_NO)
                 WHERE h.STATUS = 'A' OR h.STATUS IS NULL
                 GROUP BY NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown'))
                 ORDER BY COUNT(*) DESC
@@ -639,8 +702,13 @@ def get_hr_analytics(qdate: str = None) -> dict:
             cursor.execute("SELECT COUNT(*) FROM HR_EMP_MASTER WHERE STATUS = 'A' OR STATUS IS NULL")
             total_active = int(cursor.fetchone()[0] or 0)
             cursor.execute("""
-                SELECT COUNT(*) FROM DUTY_ROSTER
-                WHERE TRUNC(ROSTER_DATE) = {td} AND IN_TIME IS NOT NULL
+                SELECT COUNT(DISTINCT card_no) FROM (
+                    SELECT TO_CHAR(CARD_NO) AS card_no FROM DUTY_ROSTER
+                    WHERE TRUNC(ROSTER_DATE) = {td} AND IN_TIME IS NOT NULL
+                    UNION
+                    SELECT TO_CHAR(CARD_NO) AS card_no FROM ATTENDANCE_RECORDS
+                    WHERE TRUNC(ATTENDANCE_DATE) = {td} AND ENTRY_TIME IS NOT NULL
+                )
             """.format(td=td))
             present = int(cursor.fetchone()[0] or 0)
             attendance_pct = round((present / total_active * 100) if total_active > 0 else 0, 1)
@@ -652,15 +720,34 @@ def get_hr_analytics(qdate: str = None) -> dict:
         try:
             cursor.execute("""
                 SELECT
-                    TO_CHAR(ROSTER_DATE, 'DD Mon') AS day_label,
-                    SUM(CASE WHEN IN_TIME IS NOT NULL AND NVL(LATE_HRS,0) = 0 AND NVL(LATE_MNT,0) = 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN IN_TIME IS NOT NULL AND (NVL(LATE_HRS,0) > 0 OR NVL(LATE_MNT,0) > 0) THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN IN_TIME IS NULL AND NOT (UPPER(NVL(STATUS,'')) LIKE '%LEAVE%') THEN 1 ELSE 0 END),
-                    TRUNC(ROSTER_DATE)
-                FROM DUTY_ROSTER
-                WHERE ROSTER_DATE >= {td} - 29
-                GROUP BY TO_CHAR(ROSTER_DATE, 'DD Mon'), TRUNC(ROSTER_DATE)
-                ORDER BY TRUNC(ROSTER_DATE)
+                    TO_CHAR(d, 'DD Mon') AS day_label,
+                    COUNT(DISTINCT CASE WHEN status_flag = 1 THEN card_no END) AS on_time,
+                    COUNT(DISTINCT CASE WHEN status_flag = 2 THEN card_no END) AS late,
+                    COUNT(DISTINCT CASE WHEN status_flag = 3 THEN card_no END) AS absent
+                FROM (
+                    SELECT TRUNC(ROSTER_DATE) AS d, TO_CHAR(CARD_NO) AS card_no,
+                        CASE
+                            WHEN IN_TIME IS NOT NULL AND NVL(LATE_HRS,0)=0 AND NVL(LATE_MNT,0)=0 THEN 1
+                            WHEN IN_TIME IS NOT NULL AND (NVL(LATE_HRS,0)>0 OR NVL(LATE_MNT,0)>0) THEN 2
+                            WHEN IN_TIME IS NULL AND UPPER(NVL(STATUS,'')) NOT LIKE '%LEAVE%' THEN 3
+                            ELSE NULL
+                        END AS status_flag
+                    FROM DUTY_ROSTER
+                    WHERE TRUNC(ROSTER_DATE) BETWEEN {td} - 29 AND {td}
+                    UNION ALL
+                    SELECT TRUNC(ar.ATTENDANCE_DATE) AS d, TO_CHAR(ar.CARD_NO) AS card_no, 1 AS status_flag
+                    FROM ATTENDANCE_RECORDS ar
+                    WHERE TRUNC(ar.ATTENDANCE_DATE) BETWEEN {td} - 29 AND {td}
+                      AND ar.ENTRY_TIME IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM DUTY_ROSTER dr
+                        WHERE TO_CHAR(dr.CARD_NO) = TO_CHAR(ar.CARD_NO)
+                          AND TRUNC(dr.ROSTER_DATE) = TRUNC(ar.ATTENDANCE_DATE)
+                      )
+                )
+                WHERE status_flag IS NOT NULL
+                GROUP BY TO_CHAR(d, 'DD Mon'), d
+                ORDER BY d
             """.format(td=td))
             for r in cursor.fetchall():
                 daily.append({
@@ -677,18 +764,37 @@ def get_hr_analytics(qdate: str = None) -> dict:
         try:
             cursor.execute("""
                 SELECT
-                    TO_CHAR(TRUNC(ROSTER_DATE, 'MM'), 'Mon YY') AS month_label,
-                    SUM(CASE WHEN IN_TIME IS NOT NULL AND NVL(LATE_HRS,0) = 0 AND NVL(LATE_MNT,0) = 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN NVL(OT_HRS,0) > 0 OR NVL(OT_MNT,0) > 0 THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN UPPER(NVL(STATUS,'')) LIKE '%LEAVE%' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN IN_TIME IS NOT NULL AND (NVL(LATE_HRS,0) > 0 OR NVL(LATE_MNT,0) > 0) THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN IN_TIME IS NULL AND NOT (UPPER(NVL(STATUS,'')) LIKE '%LEAVE%') THEN 1 ELSE 0 END),
-                    COUNT(*) AS total_rows,
-                    TRUNC(ROSTER_DATE, 'MM')
-                FROM DUTY_ROSTER
-                WHERE ROSTER_DATE >= ADD_MONTHS(TRUNC({td}, 'MM'), -5)
-                GROUP BY TO_CHAR(TRUNC(ROSTER_DATE, 'MM'), 'Mon YY'), TRUNC(ROSTER_DATE, 'MM')
-                ORDER BY TRUNC(ROSTER_DATE, 'MM')
+                    TO_CHAR(TRUNC(d, 'MM'), 'Mon YY') AS month_label,
+                    SUM(on_time_cnt) AS on_time,
+                    SUM(overtime_cnt) AS overtime,
+                    SUM(on_leave_cnt) AS on_leave,
+                    SUM(late_cnt) AS late_clockin,
+                    SUM(absent_cnt) AS absent,
+                    SUM(total_cnt) AS total_rows,
+                    TRUNC(d, 'MM') AS month_key
+                FROM (
+                    SELECT TRUNC(ROSTER_DATE) AS d,
+                        CASE WHEN IN_TIME IS NOT NULL AND NVL(LATE_HRS,0)=0 AND NVL(LATE_MNT,0)=0 THEN 1 ELSE 0 END AS on_time_cnt,
+                        CASE WHEN NVL(OT_HRS,0)>0 OR NVL(OT_MNT,0)>0 THEN 1 ELSE 0 END AS overtime_cnt,
+                        CASE WHEN UPPER(NVL(STATUS,'')) LIKE '%LEAVE%' THEN 1 ELSE 0 END AS on_leave_cnt,
+                        CASE WHEN IN_TIME IS NOT NULL AND (NVL(LATE_HRS,0)>0 OR NVL(LATE_MNT,0)>0) THEN 1 ELSE 0 END AS late_cnt,
+                        CASE WHEN IN_TIME IS NULL AND UPPER(NVL(STATUS,'')) NOT LIKE '%LEAVE%' THEN 1 ELSE 0 END AS absent_cnt,
+                        1 AS total_cnt
+                    FROM DUTY_ROSTER
+                    WHERE TRUNC(ROSTER_DATE) BETWEEN ADD_MONTHS(TRUNC({td}, 'MM'), -5) AND {td}
+                    UNION ALL
+                    SELECT TRUNC(ar.ATTENDANCE_DATE) AS d, 1, 0, 0, 0, 0, 1
+                    FROM ATTENDANCE_RECORDS ar
+                    WHERE TRUNC(ar.ATTENDANCE_DATE) BETWEEN ADD_MONTHS(TRUNC({td}, 'MM'), -5) AND {td}
+                      AND ar.ENTRY_TIME IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM DUTY_ROSTER dr
+                        WHERE TO_CHAR(dr.CARD_NO) = TO_CHAR(ar.CARD_NO)
+                          AND TRUNC(dr.ROSTER_DATE) = TRUNC(ar.ATTENDANCE_DATE)
+                      )
+                )
+                GROUP BY TO_CHAR(TRUNC(d, 'MM'), 'Mon YY'), TRUNC(d, 'MM')
+                ORDER BY TRUNC(d, 'MM')
             """.format(td=td))
             for r in cursor.fetchall():
                 total = int(r[6] or 1)

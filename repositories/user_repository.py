@@ -434,48 +434,69 @@ def lookup_by_phone(phone: str):
 # ===============================
 
 def get_dashboard(card_no: str):
+    """Return dashboard for an employee. Split into multiple queries with isolated
+    try/except so a failure in any one lookup (e.g. ORA-01427 inside ALL_LEAVE_BAL_V
+    or a duplicate row in a code-lookup table) doesn't crash the whole dashboard.
+    """
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Use MAX() correlated subqueries instead of codename() to avoid ORA-01427
-        # (codename uses SELECT..INTO which fails when the lookup table has duplicate rows).
-        # ALL_LEAVE_BAL_V is also pulled as a subquery to prevent row-multiplication.
+        # Step 1: core employee record — no joins, no risky subqueries
         cursor.execute("""
             SELECT
-                e.emp_pk,
-                e.card_no,
-                e.emp_no,
-                e.emp_name,
-                e.date_of_join,
-                e.nic_no,
-                e.designation,
-                e.department,
-                (SELECT MAX(ci.DESCR) FROM COMPANY_INFO ci WHERE ci.COMPC = e.compc) compcnm,
-                e.compc,
-                e.brnch AS branch,
-                (SELECT MAX(cl.DESCR) FROM COM_LOCATION cl WHERE cl.LCODE = e.brnch) brnchnm,
-                e.hod1 AS hod,
-                (SELECT MAX(h.NAME) FROM HR_EMP_MASTER h WHERE h.EMPCODE = TO_CHAR(e.hod1)) hod_nm,
-                (SELECT SUM(b.balance) FROM ALL_LEAVE_BAL_V b WHERE b.card_no = e.card_no) balance
+                e.emp_pk, e.card_no, e.emp_no, e.emp_name,
+                e.date_of_join, e.nic_no, e.designation, e.department,
+                e.compc, e.brnch, e.hod1
             FROM EMPLOYEE e
             WHERE e.card_no = :card
+            FETCH FIRST 1 ROWS ONLY
         """, {"card": card_no})
-
         row = cursor.fetchone()
-
         if not row:
             return None
 
-        columns = [col[0].lower() for col in cursor.description]
+        columns = [c[0].lower() for c in cursor.description]
         result = dict(zip(columns, row))
 
-        # Serialize Oracle date/datetime to ISO string
         if result.get('date_of_join') and hasattr(result['date_of_join'], 'strftime'):
             result['date_of_join'] = result['date_of_join'].strftime('%Y-%m-%d')
-
-        # card_no must be a string for the response model
         if result.get('card_no') is not None:
             result['card_no'] = str(result['card_no'])
+
+        # Rename for the response model
+        result['branch'] = result.pop('brnch', None)
+        result['hod']    = result.pop('hod1', None)
+
+        # Step 2: company name (isolated)
+        result['compcnm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(DESCR) FROM COMPANY_INFO WHERE COMPC = :v",
+            result.get('compc'), tag="compcnm"
+        )
+
+        # Step 3: branch name (isolated)
+        result['brnchnm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(DESCR) FROM COM_LOCATION WHERE LCODE = :v",
+            result.get('branch'), tag="brnchnm"
+        )
+
+        # Step 4: HOD name (isolated)
+        result['hod_nm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(NAME) FROM HR_EMP_MASTER WHERE EMPCODE = TO_CHAR(:v)",
+            result.get('hod'), tag="hod_nm"
+        )
+
+        # Step 5: leave balance from ALL_LEAVE_BAL_V (isolated — may throw if view internals fail)
+        balance = None
+        try:
+            cursor.execute(
+                "SELECT SUM(balance) FROM ALL_LEAVE_BAL_V WHERE card_no = :c",
+                {"c": card_no},
+            )
+            r = cursor.fetchone()
+            balance = float(r[0]) if r and r[0] is not None else None
+        except Exception as e:
+            print(f"[DASHBOARD] balance lookup failed for {card_no}: {e}")
+        result['balance'] = balance
 
         return result
 
@@ -484,62 +505,73 @@ def get_dashboard(card_no: str):
         conn.close()
 
 
+def _safe_lookup_max(cursor, sql: str, value, tag: str = ""):
+    """Run a one-row MAX() lookup with a single bind. Returns None if value is None
+    or the query fails for any reason. Logs the error tag for diagnostics."""
+    if value is None:
+        return None
+    try:
+        cursor.execute(sql, {"v": value})
+        r = cursor.fetchone()
+        return r[0] if r and r[0] is not None else None
+    except Exception as e:
+        print(f"[DASHBOARD] {tag} lookup failed for value={value}: {e}")
+        return None
+
+
 # ===============================
 # USER PROFILE
 # ===============================
 
 def get_user_profile(card_no: str):
+    """Return employee profile. Split lookups for resilience against ORA-01427
+    inside lookup tables / views."""
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute("""
             SELECT
-                e.emp_pk,
-                e.emp_no,
-                e.emp_name,
-                e.father_name,
-                e.email_address,
-                e.address,
-                e.mobile_no,
+                e.emp_pk, e.emp_no, e.emp_name, e.father_name,
+                e.email_address, e.address, e.mobile_no,
                 e.sex AS gender,
-                e.date_of_birth,
-                e.date_of_join,
-                e.department,
-                e.designation,
-                e.nic_no,
-                e.nic_exp_date,
-                e.eobi_no,
-                e.uic_card_no,
-                e.salary,
-                e.type,
-                e.card_no,
-                e.compc,
-                (SELECT MAX(ci.DESCR) FROM COMPANY_INFO ci WHERE ci.COMPC = e.compc) compcnm,
-                e.brnch,
-                (SELECT MAX(cl.DESCR) FROM COM_LOCATION cl WHERE cl.LCODE = e.brnch) brnchnm,
-                e.hod1,
-                (SELECT MAX(h2.NAME) FROM HR_EMP_MASTER h2 WHERE h2.EMPCODE = TO_CHAR(e.hod1)) hod1nm,
-                e.hod2,
-                (SELECT MAX(h3.NAME) FROM HR_EMP_MASTER h3 WHERE h3.EMPCODE = TO_CHAR(e.hod2)) hod2nm,
-                h.EMPCODE AS emp_code,
-                h.STATUS AS emp_status
+                e.date_of_birth, e.date_of_join,
+                e.department, e.designation, e.nic_no, e.nic_exp_date,
+                e.eobi_no, e.uic_card_no, e.salary, e.type,
+                e.card_no, e.compc, e.brnch, e.hod1, e.hod2,
+                h.EMPCODE AS emp_code, h.STATUS AS emp_status
             FROM EMPLOYEE e
             LEFT JOIN HR_EMP_MASTER h ON h.EMPCODE = e.EMPCODE
             WHERE e.card_no = :card
+            FETCH FIRST 1 ROWS ONLY
         """, {"card": card_no})
-
         row = cursor.fetchone()
-
         if not row:
             return None
 
-        columns = [col[0].lower() for col in cursor.description]
+        columns = [c[0].lower() for c in cursor.description]
         result = dict(zip(columns, row))
 
-        # Serialize Oracle date/datetime objects to ISO string
         for key in ('date_of_birth', 'date_of_join', 'nic_exp_date'):
             if result.get(key) and hasattr(result[key], 'strftime'):
                 result[key] = result[key].strftime('%Y-%m-%d')
+
+        # Isolated name lookups
+        result['compcnm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(DESCR) FROM COMPANY_INFO WHERE COMPC = :v",
+            result.get('compc'), tag="profile.compcnm"
+        )
+        result['brnchnm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(DESCR) FROM COM_LOCATION WHERE LCODE = :v",
+            result.get('brnch'), tag="profile.brnchnm"
+        )
+        result['hod1nm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(NAME) FROM HR_EMP_MASTER WHERE EMPCODE = TO_CHAR(:v)",
+            result.get('hod1'), tag="profile.hod1nm"
+        )
+        result['hod2nm'] = _safe_lookup_max(
+            cursor, "SELECT MAX(NAME) FROM HR_EMP_MASTER WHERE EMPCODE = TO_CHAR(:v)",
+            result.get('hod2'), tag="profile.hod2nm"
+        )
 
         return result
 

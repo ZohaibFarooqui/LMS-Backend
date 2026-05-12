@@ -206,6 +206,65 @@ def add_cadre(cadre: str) -> dict:
         cursor.close(); conn.close()
 
 
+def get_locations() -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT LCODE, DESCR, SNAME, NVL(REGIONCODE,'') AS REGIONCODE, NVL(CITY,'') AS CITY
+            FROM COM_LOCATION
+            ORDER BY LCODE
+        """)
+        return [
+            {
+                "lcode": str(r[0] or "").strip(),
+                "descr": (r[1] or "").strip(),
+                "sname": (r[2] or "").strip(),
+                "regioncode": (r[3] or "").strip(),
+                "city": (r[4] or "").strip(),
+            }
+            for r in cursor.fetchall()
+        ]
+    finally:
+        cursor.close(); conn.close()
+
+
+def add_location(lcode: str, descr: str, sname: str, regioncode: str, city: str) -> dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO COM_LOCATION (LCODE, DESCR, SNAME, REGIONCODE, CITY) VALUES (:lcode, :descr, :sname, :region, :city)",
+            {"lcode": lcode.strip(), "descr": descr.strip(), "sname": (sname or descr).strip(), "region": regioncode.strip(), "city": city.strip()}
+        )
+        conn.commit()
+        return {"status": "success", "lcode": lcode.strip()}
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close(); conn.close()
+
+
+def update_location(lcode: str, descr: str, sname: str, regioncode: str, city: str) -> dict:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE COM_LOCATION SET DESCR=:descr, SNAME=:sname, REGIONCODE=:region, CITY=:city WHERE LCODE=:lcode",
+            {"lcode": lcode.strip(), "descr": descr.strip(), "sname": (sname or descr).strip(), "region": regioncode.strip(), "city": city.strip()}
+        )
+        conn.commit()
+        if cursor.rowcount == 0:
+            return {"status": "error", "message": f"Location {lcode} not found"}
+        return {"status": "success", "lcode": lcode.strip()}
+    except Exception as e:
+        conn.rollback()
+        return {"status": "error", "message": str(e)}
+    finally:
+        cursor.close(); conn.close()
+
+
 def get_religions() -> list:
     """Return distinct religion codes already in HR_EMP_MASTER, plus defaults."""
     conn = get_connection()
@@ -240,7 +299,6 @@ def get_reporting_officers() -> list:
             WHERE (STATUS = 'A' OR STATUS IS NULL)
               AND NAME IS NOT NULL
             ORDER BY NAME
-            FETCH FIRST 500 ROWS ONLY
         """)
         return [{"empcode": r[0], "name": (r[1] or "").strip()} for r in cursor.fetchall()]
     finally:

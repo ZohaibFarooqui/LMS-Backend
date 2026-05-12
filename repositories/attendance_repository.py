@@ -81,10 +81,35 @@ def get_today_record(card_no: str):
         """, {"card": card_no, "card_int": card_int, "card_num": card_num})
         row = cursor.fetchone()
         if row:
+            dr_entry = (row[1] or "").strip()
+            dr_exit  = (row[2] or "").strip()
+            # If DUTY_ROSTER row exists but IN_TIME is empty, check ATTENDANCE_RECORDS
+            # for an active session — avoids a second INSERT when the MERGE failed silently.
+            if not dr_entry:
+                try:
+                    cursor.execute("""
+                        SELECT ID, ENTRY_TIME, EXIT_TIME, CARD_NO
+                        FROM ATTENDANCE_RECORDS
+                        WHERE CARD_NO = :card
+                          AND TRUNC(ATTENDANCE_DATE) = TRUNC(SYSDATE)
+                        ORDER BY ID DESC
+                        FETCH FIRST 1 ROWS ONLY
+                    """, {"card": card_no})
+                    ar_row = cursor.fetchone()
+                    if ar_row and (ar_row[1] or "").strip():
+                        return {
+                            "id": ar_row[0],
+                            "entry_time": (ar_row[1] or "").strip(),
+                            "exit_time": (ar_row[2] or "").strip(),
+                            "card_no": str(ar_row[3]) if ar_row[3] else card_no,
+                            "source": "attendance_records",
+                        }
+                except Exception as e:
+                    print(f"[get_today_record] AR fallback check failed: {e}")
             return {
                 "id": row[0],
-                "entry_time": (row[1] or "").strip(),
-                "exit_time": (row[2] or "").strip(),
+                "entry_time": dr_entry,
+                "exit_time": dr_exit,
                 "card_no": str(row[3]) if row[3] else card_no,
                 "source": "duty_roster",
             }
@@ -238,25 +263,10 @@ def insert_check_in(card_no: str, empcode: str, *,
             print(f"[DUTY_ROSTER] CHECK_IN failed (non-fatal): {dr_err}")
 
         # ---- 2. ATTENDANCE_RECORDS (canonical store) ----
+        # MERGE prevents duplicate rows when check-in is called more than once
+        # for the same card on the same day (e.g. after a silent DUTY_ROSTER failure).
         try:
-            cursor.execute("""
-                INSERT INTO ATTENDANCE_RECORDS (
-                    ID, EMPCODE, CARD_NO, ENTRY_TIME,
-                    ATTENDANCE_DATE, ATTENDANCE_TYPE,
-                    LATITUDE, LONGITUDE, ACCURACY,
-                    ADDRESS, FORMATTED_ADDRESS,
-                    TIMESTAMP, DEVICE_ID, DEVICE_MODEL,
-                    APP_VERSION
-                ) VALUES (
-                    (SELECT NVL(MAX(ID), 0) + 1 FROM ATTENDANCE_RECORDS),
-                    :empcode, :card_no, :entry_time,
-                    TRUNC(SYSDATE), :att_type,
-                    :latitude, :longitude, :accuracy,
-                    :address, :formatted_address,
-                    :ts, :device_id, :device_model,
-                    :app_version
-                )
-            """, {
+            params = {
                 "empcode": empcode,
                 "card_no": card_no,
                 "entry_time": now,
@@ -270,9 +280,44 @@ def insert_check_in(card_no: str, empcode: str, *,
                 "device_id": str(device_id)[:400] if device_id else None,
                 "device_model": str(device_model)[:400] if device_model else None,
                 "app_version": str(app_version)[:400] if app_version else None,
-            })
+            }
+            cursor.execute("""
+                MERGE INTO ATTENDANCE_RECORDS ar
+                USING (SELECT :card_no AS cno, TRUNC(SYSDATE) AS adate FROM DUAL) src
+                ON (ar.CARD_NO = src.cno
+                    AND TRUNC(ar.ATTENDANCE_DATE) = src.adate
+                    AND ar.EXIT_TIME IS NULL)
+                WHEN MATCHED THEN
+                    UPDATE SET ar.ENTRY_TIME        = :entry_time,
+                               ar.ATTENDANCE_TYPE   = :att_type,
+                               ar.LATITUDE          = :latitude,
+                               ar.LONGITUDE         = :longitude,
+                               ar.ACCURACY          = :accuracy,
+                               ar.ADDRESS           = :address,
+                               ar.FORMATTED_ADDRESS = :formatted_address,
+                               ar.TIMESTAMP         = :ts,
+                               ar.DEVICE_ID         = :device_id,
+                               ar.DEVICE_MODEL      = :device_model,
+                               ar.APP_VERSION       = :app_version
+                WHEN NOT MATCHED THEN
+                    INSERT (ID, EMPCODE, CARD_NO, ENTRY_TIME,
+                            ATTENDANCE_DATE, ATTENDANCE_TYPE,
+                            LATITUDE, LONGITUDE, ACCURACY,
+                            ADDRESS, FORMATTED_ADDRESS,
+                            TIMESTAMP, DEVICE_ID, DEVICE_MODEL,
+                            APP_VERSION)
+                    VALUES (
+                        (SELECT NVL(MAX(ID), 0) + 1 FROM ATTENDANCE_RECORDS),
+                        :empcode, :card_no, :entry_time,
+                        TRUNC(SYSDATE), :att_type,
+                        :latitude, :longitude, :accuracy,
+                        :address, :formatted_address,
+                        :ts, :device_id, :device_model,
+                        :app_version
+                    )
+            """, params)
         except Exception as ar_err:
-            print(f"[ATTENDANCE_RECORDS] INSERT failed (non-fatal): {ar_err}")
+            print(f"[ATTENDANCE_RECORDS] MERGE failed (non-fatal): {ar_err}")
 
         conn.commit()
 
@@ -443,32 +488,33 @@ def get_attendance_report_range(card_no: str, from_date: str, to_date: str):
         try:
             cursor.execute("""
                 SELECT
-                    TRUNC(ATTENDANCE_DATE)  AS roster_date,
-                    ENTRY_TIME              AS in_time,
-                    EXIT_TIME               AS out_time,
-                    'G'                     AS roster_shift,
-                    0                       AS absent_days,
+                    TRUNC(ATTENDANCE_DATE)          AS roster_date,
+                    MIN(ENTRY_TIME)                 AS in_time,
+                    MAX(EXIT_TIME)                  AS out_time,
+                    'G'                             AS roster_shift,
+                    0                               AS absent_days,
                     CASE
-                        WHEN ENTRY_TIME IS NOT NULL THEN 'Present'
+                        WHEN MIN(ENTRY_TIME) IS NOT NULL THEN 'Present'
                         ELSE 'Absent'
-                    END                     AS status,
-                    CASE WHEN TIME_SPENT IS NOT NULL
-                         THEN FLOOR(TIME_SPENT / 60) ELSE 0
-                    END                     AS w_hrs,
-                    CASE WHEN TIME_SPENT IS NOT NULL
-                         THEN MOD(TIME_SPENT, 60) ELSE 0
-                    END                     AS w_mnt,
-                    0                       AS late_hrs,
-                    0                       AS late_mnt,
-                    0                       AS ot_hrs,
-                    0                       AS ot_mnt,
-                    ADDRESS                 AS roster_remarks,
-                    NULL                    AS day_name
+                    END                             AS status,
+                    CASE WHEN MAX(TIME_SPENT) IS NOT NULL
+                         THEN FLOOR(MAX(TIME_SPENT) / 60) ELSE 0
+                    END                             AS w_hrs,
+                    CASE WHEN MAX(TIME_SPENT) IS NOT NULL
+                         THEN MOD(MAX(TIME_SPENT), 60) ELSE 0
+                    END                             AS w_mnt,
+                    0                               AS late_hrs,
+                    0                               AS late_mnt,
+                    0                               AS ot_hrs,
+                    0                               AS ot_mnt,
+                    MAX(ADDRESS)                    AS roster_remarks,
+                    NULL                            AS day_name
                 FROM ATTENDANCE_RECORDS
                 WHERE (CARD_NO = :card OR CARD_NO = :card_int)
                   AND TRUNC(ATTENDANCE_DATE) BETWEEN
                       TO_DATE(:from_d, 'YYYY-MM-DD') AND TO_DATE(:to_d, 'YYYY-MM-DD')
-                ORDER BY ATTENDANCE_DATE
+                GROUP BY TRUNC(ATTENDANCE_DATE)
+                ORDER BY TRUNC(ATTENDANCE_DATE)
             """, {"card": card_no, "card_int": card_int, "from_d": from_date, "to_d": to_date})
 
             rows = cursor.fetchall()

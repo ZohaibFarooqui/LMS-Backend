@@ -1,4 +1,5 @@
 from repositories.user_repository import (
+    authenticate_user,
     get_user_by_login,
     get_dashboard,
     get_leave_balances,
@@ -6,6 +7,7 @@ from repositories.user_repository import (
     apply_leave,
     get_leave_status,
     update_password,
+    get_user_rights,
 )
 from core.dependencies import get_employee_flags
 
@@ -15,48 +17,25 @@ from core.dependencies import get_employee_flags
 # =====================================
 
 def login_user(username: str, password: str):
-    user = get_user_by_login(username)
+    user = authenticate_user(username, password)
 
     if not user:
-        print(f"[LOGIN] User not found for: '{username}'")
+        print(f"[LOGIN] Authentication failed for: '{username}'")
         return None
 
-    stored = (user.get("user_paswd") or "").strip()
-    entered = password.strip()
+    if user.get("card_no"):
+        try:
+            flags = get_employee_flags(user["card_no"])
+            user["face_registered"] = flags.get("face_registered", "N")
+            if not user.get("emp_name"):
+                user["emp_name"] = flags.get("emp_name", "")
+            if not user.get("empcode"):
+                user["empcode"] = flags.get("empcode", "")
+        except Exception as e:
+            print(f"[LOGIN] get_employee_flags failed (non-fatal): {e}")
 
-    print(f"[LOGIN] Password check — stored_len={len(stored)}, entered_len={len(entered)}")
-
-    if not stored:
-        print("[LOGIN] No password in DB — allowing first-time login")
-    elif stored != entered:
-        print("[LOGIN] Password mismatch")
-        return None
-
-    # If HR_EMP_MASTER already provided hr_admin & emp_name, use those;
-    # still call get_employee_flags for face_registered (from EMPLOYEE table).
-    flags = get_employee_flags(user["card_no"])
-
-    # HR_ADMIN: prefer value from HR_EMP_MASTER (direct), fallback to flags
-    # Strip whitespace in case Oracle CHAR field returns padded value
-    hr_from_master = str(user.get("hr_admin") or "N").strip().upper()
-    if hr_from_master == "Y":
-        user["hr_admin"] = "Y"
-    else:
-        user["hr_admin"] = str(flags.get("hr_admin", "N")).strip().upper()
-
-    # EMP_NAME: prefer HR_EMP_MASTER, fallback to EMPLOYEE
-    if not user.get("emp_name"):
-        user["emp_name"] = flags.get("emp_name", "")
-
-    # FACE_REGISTERED always from EMPLOYEE table
-    user["face_registered"] = flags.get("face_registered", "N")
-
-    # EMPCODE: prefer HR_EMP_MASTER, fallback to EMPLOYEE
-    if not user.get("empcode"):
-        user["empcode"] = flags.get("empcode", "")
-
-    print(f"[LOGIN] Login successful for card_no={user['card_no']}, "
-          f"face={user['face_registered']}, hr={user['hr_admin']}")
+    print(f"[LOGIN] OK — card_no={user.get('card_no')}, hr={user.get('hr_admin')}, "
+          f"companies={user.get('allowed_companies')}, branches={user.get('allowed_branches')}")
     return user
 
 

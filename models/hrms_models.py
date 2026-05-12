@@ -68,6 +68,8 @@ class EmployeeUpdateRequest(BaseModel):
     w_hour: Optional[float] = None
     bldgrp: Optional[str] = None
     location: Optional[str] = None
+    track_location: Optional[str] = None
+    track_location_hr: Optional[int] = None
 
 
 class MessageResponse(BaseModel):

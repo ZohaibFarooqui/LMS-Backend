@@ -99,8 +99,71 @@ def get_employee_flags(card_no: str) -> dict:
         conn.close()
 
 
+def _card_is_sec_username(card_no: str, empcode: str = "") -> bool:
+    """Return True if this card_no belongs to an active SEC_USERNAME account.
+
+    Handles two cases:
+    - card_no is from EMPLOYEE table → resolve mobile/empcode via HR_EMP_MASTER
+    - card_no is the mobile/username itself (SEC_USERNAME user with no employee record)
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    try:
+        mobile = ""
+        ec = empcode
+        try:
+            cur.execute("""
+                SELECT h."MOBILE#", h.EMPCODE
+                FROM HR_EMP_MASTER h
+                LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
+                WHERE TO_CHAR(e.CARD_NO) = :cn1
+                   OR TO_CHAR(h."ATDTCARD#") = :cn2
+                   OR h.EMPCODE = :cn3
+                FETCH FIRST 1 ROWS ONLY
+            """, {"cn1": card_no, "cn2": card_no, "cn3": card_no})
+            row = cur.fetchone()
+            if row:
+                mobile = str(row[0] or "").strip()
+                ec     = str(row[1] or empcode or "").strip()
+            else:
+                mobile = card_no
+        except Exception as lookup_err:
+            print(f"[_card_is_sec_username] employee lookup error: {lookup_err}")
+            mobile = card_no
+
+        if ec:
+            cur.execute("""
+                SELECT COUNT(*) FROM SEC_USERNAME
+                WHERE ECODE = :ec AND STATS = 'E'
+            """, {"ec": ec})
+            if (cur.fetchone() or [0])[0] > 0:
+                return True
+
+        if mobile:
+            m_w   = ('0' + mobile) if not mobile.startswith('0') else mobile
+            m_no0 = mobile[1:]     if mobile.startswith('0')     else mobile
+            cur.execute("""
+                SELECT COUNT(*) FROM SEC_USERNAME
+                WHERE TO_CHAR(MOBILE) IN (:sm1, :sm2, :sm3) AND STATS = 'E'
+            """, {"sm1": mobile, "sm2": m_w, "sm3": m_no0})
+            if (cur.fetchone() or [0])[0] > 0:
+                return True
+
+        return False
+    except Exception as e:
+        print(f"[_card_is_sec_username] error: {e}")
+        return False
+    finally:
+        cur.close()
+        conn.close()
+
+
 def require_hr_admin(card_no: str):
-    """Raise 403 if the given card_no does not belong to an HR admin."""
-    flags = get_employee_flags(card_no)
-    if flags["hr_admin"].upper() != "Y":
-        raise HTTPException(status_code=403, detail="HR admin access required")
+    """Raise 403 if card_no does not belong to an active SEC_USERNAME account.
+
+    Only SEC_USERNAME users have HR module access.
+    HR_EMP_MASTER.HR_ADMIN flag is no longer used for this check.
+    """
+    if _card_is_sec_username(card_no):
+        return
+    raise HTTPException(status_code=403, detail="HR admin access required")

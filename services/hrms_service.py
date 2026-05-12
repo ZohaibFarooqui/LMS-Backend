@@ -26,12 +26,12 @@ def edit_employee(empcode: str, data: dict) -> dict:
     return update_employee(empcode, filtered)
 
 
-def search_employees(query: str) -> list:
-    return search_employees_hrms(query)
+def search_employees(query: str, allowed_companies=None, allowed_branches=None) -> list:
+    return search_employees_hrms(query, allowed_companies, allowed_branches)
 
 
-def list_employees(status: str = None) -> list:
-    return list_employees_hrms(status)
+def list_employees(status: str = None, allowed_companies=None, allowed_branches=None) -> list:
+    return list_employees_hrms(status, allowed_companies, allowed_branches)
 
 
 def get_dashboard(qdate: str = None) -> dict:

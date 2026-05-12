@@ -50,6 +50,12 @@ def login(request: LoginRequest):
         emp_name=user.get("emp_name", ""),
         face_registered=user.get("face_registered", "N") == "Y",
         hr_admin=user.get("hr_admin", "N") == "Y",
+        has_self_service=user.get("has_self_service", True),
+        has_employee_features=user.get("has_employee_features", True),
+        allowed_companies=user.get("allowed_companies", []),
+        allowed_branches=user.get("allowed_branches", []),
+        company_list=user.get("company_list", []),
+        branch_list=user.get("branch_list", []),
     )
 
 
