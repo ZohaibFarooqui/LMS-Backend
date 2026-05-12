@@ -6,12 +6,14 @@ All endpoints require HR_ADMIN access (validated via admin_card_no query param).
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 
+from core.database import get_connection
 from core.dependencies import require_hr_admin
 from models.hrms_models import (
     EmployeeCreateRequest,
     EmployeeUpdateRequest,
     MessageResponse,
 )
+from repositories.user_repository import get_user_rights
 from services.hrms_service import (
     register_employee,
     get_employee,
@@ -23,6 +25,49 @@ from services.hrms_service import (
 )
 
 router = APIRouter(prefix="/hrms", tags=["HRMS"])
+
+
+def _get_admin_rights(admin_card_no: str) -> dict:
+    """Look up company/branch rights for the given admin's card_no via SEC_USERNAME.
+
+    For admins in HR_EMP_MASTER, resolve mobile/empcode from that table then call
+    get_user_rights. For SEC_USERNAME-only admins (card_no is their phone number),
+    fall back to using card_no directly as the mobile lookup.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    mobile = ""
+    empcode = ""
+    try:
+        cur.execute("""
+            SELECT h."MOBILE#", h.EMPCODE
+            FROM HR_EMP_MASTER h
+            LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
+            WHERE TO_CHAR(e.CARD_NO) = :cn1
+               OR TO_CHAR(h."ATDTCARD#") = :cn2
+               OR h.EMPCODE = :cn3
+            FETCH FIRST 1 ROWS ONLY
+        """, {"cn1": admin_card_no, "cn2": admin_card_no, "cn3": admin_card_no})
+        row = cur.fetchone()
+        if row:
+            mobile  = str(row[0] or "").strip()
+            empcode = str(row[1] or "").strip()
+        else:
+            # SEC_USERNAME-only admin (not in HR_EMP_MASTER): their stored card_no
+            # is their phone number — use it directly for the rights lookup.
+            mobile = admin_card_no
+    except Exception as e:
+        print(f"[_get_admin_rights] lookup failed: {e}")
+        mobile = admin_card_no
+    finally:
+        cur.close()
+        conn.close()
+
+    rights = get_user_rights(mobile, empcode)
+    return {
+        "allowed_companies": rights.get("allowed_companies", []),
+        "allowed_branches":  rights.get("allowed_branches",  []),
+    }
 
 
 # ===================================
@@ -60,7 +105,8 @@ def hrms_list_employees(
 ):
     """Return all employees, optionally filtered by status."""
     require_hr_admin(admin_card_no)
-    return {"items": list_employees(status)}
+    rights = _get_admin_rights(admin_card_no)
+    return {"items": list_employees(status, rights["allowed_companies"], rights["allowed_branches"])}
 
 
 # ===================================
@@ -73,7 +119,8 @@ def hrms_search(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
 ):
     require_hr_admin(admin_card_no)
-    results = search_employees(q)
+    rights = _get_admin_rights(admin_card_no)
+    results = search_employees(q, rights["allowed_companies"], rights["allowed_branches"])
     return {"items": results}
 
 
