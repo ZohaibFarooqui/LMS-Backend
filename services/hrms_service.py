@@ -34,9 +34,9 @@ def list_employees(status: str = None, allowed_companies=None, allowed_branches=
     return list_employees_hrms(status, allowed_companies, allowed_branches)
 
 
-def get_dashboard(qdate: str = None) -> dict:
-    return get_hr_dashboard_stats(qdate)
+def get_dashboard(qdate: str = None, compc=None, brnch=None) -> dict:
+    return get_hr_dashboard_stats(qdate, compc=compc, brnch=brnch)
 
 
-def get_analytics(qdate: str = None) -> dict:
-    return get_hr_analytics(qdate)
+def get_analytics(qdate: str = None, compc=None, brnch=None) -> dict:
+    return get_hr_analytics(qdate, compc=compc, brnch=brnch)

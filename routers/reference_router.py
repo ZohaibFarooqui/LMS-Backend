@@ -24,33 +24,37 @@ router = APIRouter(prefix="/reference", tags=["Reference Data"])
 # ─────────────────────────────────────────────────────────────────
 
 @router.get("/departments")
-def list_departments():
-    return {"items": get_departments()}
+def list_departments(compc: Optional[str] = Query(None), brnch: Optional[str] = Query(None)):
+    return {"items": get_departments(compc, brnch)}
 
 
 @router.get("/grades")
-def list_grades():
-    return {"items": get_grades()}
+def list_grades(compc: Optional[str] = Query(None), brnch: Optional[str] = Query(None)):
+    return {"items": get_grades(compc, brnch)}
 
 
 @router.get("/designations")
-def list_designations(grade_cd: Optional[str] = Query(None)):
-    return {"items": get_designations(grade_cd)}
+def list_designations(
+    grade_cd: Optional[str] = Query(None),
+    compc: Optional[str] = Query(None),
+    brnch: Optional[str] = Query(None),
+):
+    return {"items": get_designations(grade_cd, compc, brnch)}
 
 
 @router.get("/shifts")
-def list_shifts():
-    return {"items": get_shifts()}
+def list_shifts(compc: Optional[str] = Query(None), brnch: Optional[str] = Query(None)):
+    return {"items": get_shifts(compc, brnch)}
 
 
 @router.get("/blood-groups")
-def list_blood_groups():
-    return {"items": get_blood_groups()}
+def list_blood_groups(compc: Optional[str] = Query(None), brnch: Optional[str] = Query(None)):
+    return {"items": get_blood_groups(compc, brnch)}
 
 
 @router.get("/cadre")
-def list_cadre():
-    return {"items": get_cadre()}
+def list_cadre(compc: Optional[str] = Query(None), brnch: Optional[str] = Query(None)):
+    return {"items": get_cadre(compc, brnch)}
 
 
 @router.get("/units")

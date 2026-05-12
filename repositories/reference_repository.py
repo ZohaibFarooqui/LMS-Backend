@@ -3,81 +3,150 @@
 from core.database import get_connection
 
 
+def _try_filtered(cursor, filtered_sql, filtered_params, fallback_sql, fallback_params):
+    """Try filtered query. If it fails with ORA-00904 (column doesn't exist) or
+    ORA-00942 (table missing), fall back to the unfiltered query."""
+    try:
+        cursor.execute(filtered_sql, filtered_params)
+        return cursor.fetchall(), [c[0].lower() for c in cursor.description]
+    except Exception as e:
+        msg = str(e)
+        if "ORA-00904" in msg or "ORA-00942" in msg:
+            print(f"[REFERENCE] Filter not applicable for this table: {msg.splitlines()[0][:80]}")
+            cursor.execute(fallback_sql, fallback_params)
+            return cursor.fetchall(), [c[0].lower() for c in cursor.description]
+        raise
+
+
+def _build_filter(compc=None, brnch=None):
+    """Return list of WHERE-clause parts and a params dict for COMPC/BRNCH filters."""
+    parts = []
+    params = {}
+    if compc:
+        parts.append("COMPC = :_f_compc")
+        try:
+            params["_f_compc"] = int(compc)
+        except (ValueError, TypeError):
+            params["_f_compc"] = compc
+    if brnch:
+        parts.append("BRNCH = :_f_brnch")
+        try:
+            params["_f_brnch"] = int(brnch)
+        except (ValueError, TypeError):
+            params["_f_brnch"] = brnch
+    return parts, params
+
+
 # ─────────────────────────────────────────────────────────────────
 # READ FUNCTIONS
 # ─────────────────────────────────────────────────────────────────
 
-def get_departments() -> list:
+def get_departments(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT ORDER BY DEPT_NAME")
-        return [{"dept_no": r[0], "dept_name": (r[1] or "").strip()} for r in cursor.fetchall()]
-    finally:
-        cursor.close(); conn.close()
-
-
-def get_grades() -> list:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE STATUS = 'A' OR STATUS IS NULL ORDER BY GRADE_CD")
-        return [{"grade_cd": (r[0] or "").strip(), "descr": (r[1] or "").strip()} for r in cursor.fetchall()]
-    finally:
-        cursor.close(); conn.close()
-
-
-def get_designations(grade_cd: str = None) -> list:
-    conn = get_connection()
-    cursor = conn.cursor()
-    try:
-        if grade_cd:
-            cursor.execute(
-                "SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG WHERE GRADE_CD = :g ORDER BY DESG_CD",
-                {"g": grade_cd}
-            )
+        filt, fparams = _build_filter(compc, brnch)
+        fallback_sql = "SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT ORDER BY DEPT_NAME"
+        if filt:
+            filtered_sql = f"SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT WHERE {' AND '.join(filt)} ORDER BY DEPT_NAME"
+            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
         else:
-            cursor.execute("SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG ORDER BY GRADE_CD, DESG_CD")
-        return [{"grade_cd": (r[0] or "").strip(), "desg_cd": str(r[1]).strip(), "desg_desc": (r[2] or "").strip()} for r in cursor.fetchall()]
+            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        return [{"dept_no": r[0], "dept_name": (r[1] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
 
 
-def get_shifts() -> list:
+def get_grades(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD ORDER BY SHIFT")
-        return [
-            {"shift": r[0], "shift_desc": (r[1] or "").strip(),
-             "time_from": r[2], "time_to": r[3]}
-            for r in cursor.fetchall()
-        ]
+        filt, fparams = _build_filter(compc, brnch)
+        fallback_sql = "SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE (STATUS = 'A' OR STATUS IS NULL) ORDER BY GRADE_CD"
+        if filt:
+            filtered_sql = f"SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE (STATUS = 'A' OR STATUS IS NULL) AND {' AND '.join(filt)} ORDER BY GRADE_CD"
+            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
+        else:
+            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        return [{"grade_cd": (r[0] or "").strip(), "descr": (r[1] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
 
 
-def get_blood_groups() -> list:
+def get_designations(grade_cd: str = None, compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP ORDER BY BLOOD_GROUP_PK")
-        return [{"pk": r[0], "blood_group": r[1]} for r in cursor.fetchall()]
+        filt, fparams = _build_filter(compc, brnch)
+        base_where = []
+        base_params = {}
+        if grade_cd:
+            base_where.append("GRADE_CD = :g")
+            base_params["g"] = grade_cd
+        fallback_where = (" WHERE " + " AND ".join(base_where)) if base_where else ""
+        fallback_sql = f"SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG{fallback_where} ORDER BY GRADE_CD, DESG_CD"
+        if filt:
+            all_parts = base_where + filt
+            filtered_sql = f"SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG WHERE {' AND '.join(all_parts)} ORDER BY GRADE_CD, DESG_CD"
+            rows, _ = _try_filtered(cursor, filtered_sql, {**base_params, **fparams}, fallback_sql, base_params)
+        else:
+            cursor.execute(fallback_sql, base_params); rows = cursor.fetchall()
+        return [{"grade_cd": (r[0] or "").strip(), "desg_cd": str(r[1]).strip(), "desg_desc": (r[2] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
 
 
-def get_cadre() -> list:
+def get_shifts(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT CADRE_PK, CADRE FROM CADRE ORDER BY CADRE")
-        return [{"pk": r[0], "cadre": r[1]} for r in cursor.fetchall()]
+        filt, fparams = _build_filter(compc, brnch)
+        fallback_sql = "SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD ORDER BY SHIFT"
+        if filt:
+            filtered_sql = f"SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD WHERE {' AND '.join(filt)} ORDER BY SHIFT"
+            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
+        else:
+            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        return [{"shift": r[0], "shift_desc": (r[1] or "").strip(),
+                 "time_from": r[2], "time_to": r[3]} for r in rows]
+    finally:
+        cursor.close(); conn.close()
+
+
+def get_blood_groups(compc=None, brnch=None) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        filt, fparams = _build_filter(compc, brnch)
+        fallback_sql = "SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP ORDER BY BLOOD_GROUP_PK"
+        if filt:
+            filtered_sql = f"SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP WHERE {' AND '.join(filt)} ORDER BY BLOOD_GROUP_PK"
+            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
+        else:
+            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        return [{"pk": r[0], "blood_group": r[1]} for r in rows]
+    finally:
+        cursor.close(); conn.close()
+
+
+def get_cadre(compc=None, brnch=None) -> list:
+    conn = get_connection()
+    cursor = conn.cursor()
+    try:
+        filt, fparams = _build_filter(compc, brnch)
+        fallback_sql = "SELECT CADRE_PK, CADRE FROM CADRE ORDER BY CADRE"
+        if filt:
+            filtered_sql = f"SELECT CADRE_PK, CADRE FROM CADRE WHERE {' AND '.join(filt)} ORDER BY CADRE"
+            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
+        else:
+            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        return [{"pk": r[0], "cadre": r[1]} for r in rows]
     finally:
         cursor.close(); conn.close()
 
 
 def get_units() -> list:
+    # Units ARE the company list — never filter by company
     conn = get_connection()
     cursor = conn.cursor()
     try:

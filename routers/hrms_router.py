@@ -78,20 +78,38 @@ def _get_admin_rights(admin_card_no: str) -> dict:
 def hrms_dashboard(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
     date: Optional[str] = Query(None, description="Date to query (YYYY-MM-DD), defaults to today"),
+    compc: Optional[str] = Query(None, description="Selected company (UNIT_ID) to filter by"),
+    brnch: Optional[str] = Query(None, description="Selected branch (LOCATION) to filter by"),
 ):
     """Get aggregated HR dashboard stats: present, absent, late, dept breakdown."""
     require_hr_admin(admin_card_no)
-    return get_dashboard(qdate=date)
+    return get_dashboard(qdate=date, compc=compc, brnch=brnch)
 
 
 @router.get("/dashboard/analytics")
 def hrms_analytics(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
     date: Optional[str] = Query(None, description="Date to query (YYYY-MM-DD), defaults to today"),
+    compc: Optional[str] = Query(None, description="Selected company to filter by"),
+    brnch: Optional[str] = Query(None, description="Selected branch to filter by"),
 ):
     """Chart-ready analytics: daily status (30d), monthly trends (6m), KPIs."""
     require_hr_admin(admin_card_no)
-    return get_analytics(qdate=date)
+    return get_analytics(qdate=date, compc=compc, brnch=brnch)
+
+
+def _resolve_filter_lists(admin_card_no: str, compc: Optional[str], brnch: Optional[str]):
+    """Resolve the company/branch filter lists for an HRMS query.
+    - If admin selected a specific compc/brnch in the UI, use just that one (but
+      only if it's within their allowed list — otherwise fall back to allowed).
+    - If no selection, use the full allowed list from SEC_USERCMPN/SEC_USERBRCH.
+    """
+    rights = _get_admin_rights(admin_card_no)
+    allowed_c = rights["allowed_companies"]
+    allowed_b = rights["allowed_branches"]
+    final_c = [compc] if compc and (not allowed_c or compc in allowed_c) else allowed_c
+    final_b = [brnch] if brnch and (not allowed_b or brnch in allowed_b) else allowed_b
+    return final_c, final_b
 
 
 # ===================================
@@ -102,11 +120,13 @@ def hrms_analytics(
 def hrms_list_employees(
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
     status: str = Query(None, description="Filter by status: A=Active, I=Inactive, L=Left"),
+    compc: Optional[str] = Query(None, description="Selected company (UNIT_ID) to filter by"),
+    brnch: Optional[str] = Query(None, description="Selected branch (LOCATION) to filter by"),
 ):
-    """Return all employees, optionally filtered by status."""
+    """Return all employees, optionally filtered by status + selected company/branch."""
     require_hr_admin(admin_card_no)
-    rights = _get_admin_rights(admin_card_no)
-    return {"items": list_employees(status, rights["allowed_companies"], rights["allowed_branches"])}
+    final_c, final_b = _resolve_filter_lists(admin_card_no, compc, brnch)
+    return {"items": list_employees(status, final_c, final_b)}
 
 
 # ===================================
@@ -117,10 +137,12 @@ def hrms_list_employees(
 def hrms_search(
     q: str = Query(..., min_length=1, description="Search term"),
     admin_card_no: str = Query(..., description="Card no of requesting HR admin"),
+    compc: Optional[str] = Query(None),
+    brnch: Optional[str] = Query(None),
 ):
     require_hr_admin(admin_card_no)
-    rights = _get_admin_rights(admin_card_no)
-    results = search_employees(q, rights["allowed_companies"], rights["allowed_branches"])
+    final_c, final_b = _resolve_filter_lists(admin_card_no, compc, brnch)
+    results = search_employees(q, final_c, final_b)
     return {"items": results}
 
 

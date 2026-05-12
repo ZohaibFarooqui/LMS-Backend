@@ -329,7 +329,29 @@ def list_employees_hrms(status: str = None, allowed_companies=None, allowed_bran
 # HR DASHBOARD — today's attendance overview across all employees
 # ------------------------------------------------------------------
 
-def get_hr_dashboard_stats(qdate: str = None) -> dict:
+def _emp_filter_sql(compc=None, brnch=None, alias="h"):
+    """Build ' AND alias.UNIT_ID = :ec AND alias.LOCATION = :eb' fragments for
+    HR_EMP_MASTER-based queries. Returns (sql_fragment, params_dict)."""
+    parts = []
+    params = {}
+    if compc:
+        parts.append(f"{alias}.UNIT_ID = :_emp_compc")
+        try:
+            params["_emp_compc"] = int(compc)
+        except (ValueError, TypeError):
+            params["_emp_compc"] = compc
+    if brnch:
+        parts.append(f"{alias}.LOCATION = :_emp_brnch")
+        try:
+            params["_emp_brnch"] = int(brnch)
+        except (ValueError, TypeError):
+            params["_emp_brnch"] = brnch
+    if parts:
+        return " AND " + " AND ".join(parts), params
+    return "", {}
+
+
+def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
     """Get aggregated stats for the HR dashboard overview. qdate format: YYYY-MM-DD."""
     import re
     if qdate and re.match(r'^\d{4}-\d{2}-\d{2}$', qdate):
@@ -339,15 +361,25 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
         td = "TRUNC(SYSDATE)"
         yd = "TRUNC(SYSDATE) - 1"
 
+    emp_filter, emp_params = _emp_filter_sql(compc, brnch, alias="h")
+
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Total active employees
-        cursor.execute("""
-            SELECT COUNT(*) FROM HR_EMP_MASTER
-            WHERE STATUS = 'A' OR STATUS IS NULL
-        """)
-        total_employees = cursor.fetchone()[0] or 0
+        # Total active employees (filtered by selected company/branch)
+        try:
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM HR_EMP_MASTER h
+                WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){emp_filter}
+            """, emp_params)
+            total_employees = cursor.fetchone()[0] or 0
+        except Exception as e:
+            print(f"[HR_DASHBOARD] Total count filter failed, falling back: {e}")
+            cursor.execute("""
+                SELECT COUNT(*) FROM HR_EMP_MASTER
+                WHERE STATUS = 'A' OR STATUS IS NULL
+            """)
+            total_employees = cursor.fetchone()[0] or 0
 
         # Today's attendance from DUTY_ROSTER
         present = 0
@@ -404,10 +436,10 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
 
         absent = max(total_employees - present - on_leave, 0)
 
-        # Department-wise breakdown
+        # Department-wise breakdown (filtered)
         dept_breakdown = []
         try:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT
                     NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown')) AS dept,
                     COUNT(*) AS total,
@@ -423,11 +455,11 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
                     FROM ATTENDANCE_RECORDS
                     WHERE TRUNC(ATTENDANCE_DATE) = {td} AND ENTRY_TIME IS NOT NULL
                 ) ar ON ar.card_no = TO_CHAR(e.CARD_NO)
-                WHERE h.STATUS = 'A' OR h.STATUS IS NULL
+                WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){emp_filter}
                 GROUP BY NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown'))
                 ORDER BY COUNT(*) DESC
                 FETCH FIRST 10 ROWS ONLY
-            """.format(td=td))
+            """, emp_params)
             rows = cursor.fetchall()
             for r in rows:
                 dept_breakdown.append({
@@ -438,13 +470,13 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Department breakdown failed: {e}")
 
-        # Recent hires (last 30 days)
+        # Recent hires (last 30 days) — filtered
         recent_hires = 0
         try:
-            cursor.execute("""
-                SELECT COUNT(*) FROM HR_EMP_MASTER
-                WHERE DTOFAPPT >= SYSDATE - 30
-            """)
+            cursor.execute(f"""
+                SELECT COUNT(*) FROM HR_EMP_MASTER h
+                WHERE h.DTOFAPPT >= SYSDATE - 30{emp_filter}
+            """, emp_params)
             recent_hires = int(cursor.fetchone()[0] or 0)
         except Exception:
             pass
@@ -469,10 +501,10 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Yesterday stats failed: {e}")
 
-        # Upcoming birthdays (next 14 days) using day-of-year modulo
+        # Upcoming birthdays (next 14 days) — filtered
         upcoming_birthdays = []
         try:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT h.NAME,
                     TO_CHAR(h.DTOFBRTH, 'DD Mon') AS bday,
                     NVL(dep.DEPT_NAME, 'N/A') AS dept,
@@ -483,10 +515,10 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
                 WHERE (h.STATUS = 'A' OR h.STATUS IS NULL)
                   AND h.DTOFBRTH IS NOT NULL
                   AND MOD(TO_NUMBER(TO_CHAR(h.DTOFBRTH, 'DDD'))
-                      - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14
+                      - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14{emp_filter}
                 ORDER BY days_until
                 FETCH FIRST 8 ROWS ONLY
-            """)
+            """, emp_params)
             for r in cursor.fetchall():
                 upcoming_birthdays.append({
                     "name": r[0] or "Unknown",
@@ -497,10 +529,10 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Birthdays failed: {e}")
 
-        # Upcoming work anniversaries (next 14 days)
+        # Upcoming work anniversaries (next 14 days) — filtered
         upcoming_anniversaries = []
         try:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT h.NAME,
                     TO_CHAR(h.DTOFAPPT, 'DD Mon') AS ann_date,
                     TO_NUMBER(TO_CHAR(SYSDATE, 'YYYY'))
@@ -515,10 +547,10 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
                   AND MOD(TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'DDD'))
                       - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14
                   AND TO_NUMBER(TO_CHAR(SYSDATE, 'YYYY'))
-                      > TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'YYYY'))
+                      > TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'YYYY')){emp_filter}
                 ORDER BY days_until
                 FETCH FIRST 8 ROWS ONLY
-            """)
+            """, emp_params)
             for r in cursor.fetchall():
                 upcoming_anniversaries.append({
                     "name": r[0] or "Unknown",
@@ -651,7 +683,7 @@ def get_hr_dashboard_stats(qdate: str = None) -> dict:
 # HR ANALYTICS — chart data for the enhanced dashboard
 # ------------------------------------------------------------------
 
-def get_hr_analytics(qdate: str = None) -> dict:
+def get_hr_analytics(qdate: str = None, compc=None, brnch=None) -> dict:
     """Return chart-ready analytics: daily status (30d), monthly trends (6m), KPIs."""
     import re
     if qdate and re.match(r'^\d{4}-\d{2}-\d{2}$', qdate):
