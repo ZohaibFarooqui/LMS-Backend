@@ -434,58 +434,96 @@ def lookup_by_phone(phone: str):
 # ===============================
 
 def get_dashboard(card_no: str):
-    """Return dashboard for an employee. Split into multiple queries with isolated
-    try/except so a failure in any one lookup (e.g. ORA-01427 inside ALL_LEAVE_BAL_V
-    or a duplicate row in a code-lookup table) doesn't crash the whole dashboard.
+    """Return dashboard for an employee. Queries HR_EMP_MASTER (a real base table)
+    instead of EMPLOYEE (which is a view whose internal scalar subqueries throw
+    ORA-01427 for certain users). All lookups are wrapped in isolated try/except
+    so any single failure logs but doesn't crash the endpoint.
     """
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Step 1: core employee record — no joins, no risky subqueries
-        cursor.execute("""
-            SELECT
-                e.emp_pk, e.card_no, e.emp_no, e.emp_name,
-                e.date_of_join, e.nic_no, e.designation, e.department,
-                e.compc, e.brnch, e.hod1
-            FROM EMPLOYEE e
-            WHERE e.card_no = :card
-            FETCH FIRST 1 ROWS ONLY
-        """, {"card": card_no})
-        row = cursor.fetchone()
+        # Step 1: core employee record from HR_EMP_MASTER (real table, no view internals).
+        # Join EMPLOYEE only for CARD_NO and a few aux fields. If the EMPLOYEE join
+        # itself throws ORA-01427, fall back to HR_EMP_MASTER alone.
+        row = None
+        columns = []
+        try:
+            cursor.execute("""
+                SELECT
+                    h.EMPCODE                    AS emp_pk,
+                    TO_CHAR(e.CARD_NO)           AS card_no,
+                    h."ATDTCARD#"                AS emp_no,
+                    h.NAME                       AS emp_name,
+                    TO_CHAR(h.DTOFAPPT, 'YYYY-MM-DD') AS date_of_join,
+                    h.NICNO                      AS nic_no,
+                    TO_CHAR(h.DESG_CD)           AS designation,
+                    TO_CHAR(h.DEPT_NO)           AS department,
+                    h.UNIT_ID                    AS compc,
+                    h.LOCATION                   AS branch,
+                    h.HOD1                       AS hod
+                FROM HR_EMP_MASTER h
+                LEFT JOIN EMPLOYEE e ON e.EMPCODE = h.EMPCODE
+                WHERE TO_CHAR(e.CARD_NO) = :card1
+                   OR h."ATDTCARD#"      = :card2
+                   OR h.EMPCODE          = :card3
+                FETCH FIRST 1 ROWS ONLY
+            """, {"card1": card_no, "card2": card_no, "card3": card_no})
+            row = cursor.fetchone()
+            columns = [c[0].lower() for c in cursor.description]
+        except Exception as e:
+            print(f"[DASHBOARD] HR_EMP_MASTER + EMPLOYEE join failed for {card_no}: {e}")
+            # Fallback: HR_EMP_MASTER alone (no EMPLOYEE join at all)
+            try:
+                cursor.execute("""
+                    SELECT
+                        h.EMPCODE                    AS emp_pk,
+                        h."ATDTCARD#"                AS card_no,
+                        h."ATDTCARD#"                AS emp_no,
+                        h.NAME                       AS emp_name,
+                        TO_CHAR(h.DTOFAPPT, 'YYYY-MM-DD') AS date_of_join,
+                        h.NICNO                      AS nic_no,
+                        TO_CHAR(h.DESG_CD)           AS designation,
+                        TO_CHAR(h.DEPT_NO)           AS department,
+                        h.UNIT_ID                    AS compc,
+                        h.LOCATION                   AS branch,
+                        h.HOD1                       AS hod
+                    FROM HR_EMP_MASTER h
+                    WHERE h."ATDTCARD#" = :card1 OR h.EMPCODE = :card2
+                    FETCH FIRST 1 ROWS ONLY
+                """, {"card1": card_no, "card2": card_no})
+                row = cursor.fetchone()
+                columns = [c[0].lower() for c in cursor.description]
+            except Exception as e2:
+                print(f"[DASHBOARD] HR_EMP_MASTER fallback also failed for {card_no}: {e2}")
+                return None
+
         if not row:
             return None
 
-        columns = [c[0].lower() for c in cursor.description]
         result = dict(zip(columns, row))
-
-        if result.get('date_of_join') and hasattr(result['date_of_join'], 'strftime'):
-            result['date_of_join'] = result['date_of_join'].strftime('%Y-%m-%d')
         if result.get('card_no') is not None:
             result['card_no'] = str(result['card_no'])
+        if result.get('emp_pk') is not None:
+            try:
+                result['emp_pk'] = float(result['emp_pk'])
+            except (ValueError, TypeError):
+                result['emp_pk'] = None
 
-        # Rename for the response model
-        result['branch'] = result.pop('brnch', None)
-        result['hod']    = result.pop('hod1', None)
-
-        # Step 2: company name (isolated)
+        # Isolated name lookups — any failure leaves the field as None
         result['compcnm'] = _safe_lookup_max(
             cursor, "SELECT MAX(DESCR) FROM COMPANY_INFO WHERE COMPC = :v",
             result.get('compc'), tag="compcnm"
         )
-
-        # Step 3: branch name (isolated)
         result['brnchnm'] = _safe_lookup_max(
             cursor, "SELECT MAX(DESCR) FROM COM_LOCATION WHERE LCODE = :v",
             result.get('branch'), tag="brnchnm"
         )
-
-        # Step 4: HOD name (isolated)
         result['hod_nm'] = _safe_lookup_max(
             cursor, "SELECT MAX(NAME) FROM HR_EMP_MASTER WHERE EMPCODE = TO_CHAR(:v)",
             result.get('hod'), tag="hod_nm"
         )
 
-        # Step 5: leave balance from ALL_LEAVE_BAL_V (isolated — may throw if view internals fail)
+        # Leave balance — isolated, may throw if ALL_LEAVE_BAL_V internals fail
         balance = None
         try:
             cursor.execute(
