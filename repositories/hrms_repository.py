@@ -330,22 +330,23 @@ def list_employees_hrms(status: str = None, allowed_companies=None, allowed_bran
 # ------------------------------------------------------------------
 
 def _emp_filter_sql(compc=None, brnch=None, alias="h"):
-    """Build ' AND alias.UNIT_ID = :ec AND alias.LOCATION = :eb' fragments for
-    HR_EMP_MASTER-based queries. Returns (sql_fragment, params_dict)."""
+    """Build ' AND alias.UNIT_ID = :ecompc AND alias.LOCATION = :ebrnch' fragments
+    for HR_EMP_MASTER-based queries. Bind names start with a letter (Oracle rule).
+    Returns (sql_fragment, params_dict)."""
     parts = []
     params = {}
     if compc:
-        parts.append(f"{alias}.UNIT_ID = :_emp_compc")
+        parts.append(f"{alias}.UNIT_ID = :ecompc")
         try:
-            params["_emp_compc"] = int(compc)
+            params["ecompc"] = int(compc)
         except (ValueError, TypeError):
-            params["_emp_compc"] = compc
+            params["ecompc"] = compc
     if brnch:
-        parts.append(f"{alias}.LOCATION = :_emp_brnch")
+        parts.append(f"{alias}.LOCATION = :ebrnch")
         try:
-            params["_emp_brnch"] = int(brnch)
+            params["ebrnch"] = int(brnch)
         except (ValueError, TypeError):
-            params["_emp_brnch"] = brnch
+            params["ebrnch"] = brnch
     if parts:
         return " AND " + " AND ".join(parts), params
     return "", {}

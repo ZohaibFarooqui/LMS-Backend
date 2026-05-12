@@ -4,36 +4,34 @@ from core.database import get_connection
 
 
 def _try_filtered(cursor, filtered_sql, filtered_params, fallback_sql, fallback_params):
-    """Try filtered query. If it fails with ORA-00904 (column doesn't exist) or
-    ORA-00942 (table missing), fall back to the unfiltered query."""
+    """Try filtered query. If it fails (e.g. column doesn't exist, table missing,
+    or bind issues), fall back to the unfiltered query so the endpoint still works."""
     try:
         cursor.execute(filtered_sql, filtered_params)
         return cursor.fetchall(), [c[0].lower() for c in cursor.description]
     except Exception as e:
-        msg = str(e)
-        if "ORA-00904" in msg or "ORA-00942" in msg:
-            print(f"[REFERENCE] Filter not applicable for this table: {msg.splitlines()[0][:80]}")
-            cursor.execute(fallback_sql, fallback_params)
-            return cursor.fetchall(), [c[0].lower() for c in cursor.description]
-        raise
+        print(f"[REFERENCE] Filter not applicable, using fallback: {str(e).splitlines()[0][:120]}")
+        cursor.execute(fallback_sql, fallback_params)
+        return cursor.fetchall(), [c[0].lower() for c in cursor.description]
 
 
 def _build_filter(compc=None, brnch=None):
-    """Return list of WHERE-clause parts and a params dict for COMPC/BRNCH filters."""
+    """Return list of WHERE-clause parts and a params dict for COMPC/BRNCH filters.
+    Bind placeholders MUST start with a letter (Oracle rule) — using fcompc/fbrnch."""
     parts = []
     params = {}
     if compc:
-        parts.append("COMPC = :_f_compc")
+        parts.append("COMPC = :fcompc")
         try:
-            params["_f_compc"] = int(compc)
+            params["fcompc"] = int(compc)
         except (ValueError, TypeError):
-            params["_f_compc"] = compc
+            params["fcompc"] = compc
     if brnch:
-        parts.append("BRNCH = :_f_brnch")
+        parts.append("BRNCH = :fbrnch")
         try:
-            params["_f_brnch"] = int(brnch)
+            params["fbrnch"] = int(brnch)
         except (ValueError, TypeError):
-            params["_f_brnch"] = brnch
+            params["fbrnch"] = brnch
     return parts, params
 
 
