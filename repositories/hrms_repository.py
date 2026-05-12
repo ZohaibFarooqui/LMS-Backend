@@ -329,27 +329,58 @@ def list_employees_hrms(status: str = None, allowed_companies=None, allowed_bran
 # HR DASHBOARD — today's attendance overview across all employees
 # ------------------------------------------------------------------
 
-def _emp_filter_sql(compc=None, brnch=None, alias="h"):
-    """Build ' AND alias.UNIT_ID = :ecompc AND alias.LOCATION = :ebrnch' fragments
-    for HR_EMP_MASTER-based queries. Bind names start with a letter (Oracle rule).
-    Returns (sql_fragment, params_dict)."""
-    parts = []
-    params = {}
+def _coerce_num(val):
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return val
+
+
+def _emp_filter_attempts(compc=None, brnch=None, alias="h"):
+    """Return a list of (sql_fragment, params) tuples to try in order of decreasing
+    restrictiveness. Each fragment is ' AND <conditions>' or '' for unfiltered."""
+    attempts = []
+    if compc and brnch:
+        attempts.append((
+            f" AND {alias}.UNIT_ID = :ecompc AND {alias}.LOCATION = :ebrnch",
+            {"ecompc": _coerce_num(compc), "ebrnch": _coerce_num(brnch)},
+        ))
     if compc:
-        parts.append(f"{alias}.UNIT_ID = :ecompc")
-        try:
-            params["ecompc"] = int(compc)
-        except (ValueError, TypeError):
-            params["ecompc"] = compc
+        attempts.append((
+            f" AND {alias}.UNIT_ID = :ecompc",
+            {"ecompc": _coerce_num(compc)},
+        ))
     if brnch:
-        parts.append(f"{alias}.LOCATION = :ebrnch")
+        attempts.append((
+            f" AND {alias}.LOCATION = :ebrnch",
+            {"ebrnch": _coerce_num(brnch)},
+        ))
+    attempts.append(("", {}))
+    return attempts
+
+
+def _execute_with_emp_filter(cursor, sql_template, compc, brnch, alias="h", extra_params=None):
+    """Execute sql_template (contains '{filter}' marker) trying COMPC+BRNCH, then
+    COMPC alone, then BRNCH alone, then unfiltered. Raises if no attempt succeeds."""
+    extra_params = extra_params or {}
+    last_err = None
+    for frag, params in _emp_filter_attempts(compc, brnch, alias):
         try:
-            params["ebrnch"] = int(brnch)
-        except (ValueError, TypeError):
-            params["ebrnch"] = brnch
-    if parts:
-        return " AND " + " AND ".join(parts), params
-    return "", {}
+            cursor.execute(sql_template.replace("{filter}", frag), {**extra_params, **params})
+            return
+        except Exception as e:
+            if "ORA-00904" in str(e):
+                last_err = str(e).splitlines()[0][:100]
+                continue
+            raise
+    raise RuntimeError(f"All HR_EMP_MASTER filter attempts failed: {last_err}")
+
+
+# Backwards-compat wrapper for code that still calls _emp_filter_sql; returns the
+# most-restrictive fragment + params (the OLD behavior — single attempt only).
+def _emp_filter_sql(compc=None, brnch=None, alias="h"):
+    attempts = _emp_filter_attempts(compc, brnch, alias)
+    return attempts[0]
 
 
 def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
@@ -362,25 +393,20 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
         td = "TRUNC(SYSDATE)"
         yd = "TRUNC(SYSDATE) - 1"
 
-    emp_filter, emp_params = _emp_filter_sql(compc, brnch, alias="h")
-
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        # Total active employees (filtered by selected company/branch)
+        # Total active employees (filtered progressively by selected company/branch)
+        total_employees = 0
         try:
-            cursor.execute(f"""
-                SELECT COUNT(*) FROM HR_EMP_MASTER h
-                WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){emp_filter}
-            """, emp_params)
+            _execute_with_emp_filter(
+                cursor,
+                "SELECT COUNT(*) FROM HR_EMP_MASTER h WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){filter}",
+                compc, brnch,
+            )
             total_employees = cursor.fetchone()[0] or 0
         except Exception as e:
-            print(f"[HR_DASHBOARD] Total count filter failed, falling back: {e}")
-            cursor.execute("""
-                SELECT COUNT(*) FROM HR_EMP_MASTER
-                WHERE STATUS = 'A' OR STATUS IS NULL
-            """)
-            total_employees = cursor.fetchone()[0] or 0
+            print(f"[HR_DASHBOARD] Total count failed: {e}")
 
         # Today's attendance from DUTY_ROSTER
         present = 0
@@ -437,10 +463,10 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
 
         absent = max(total_employees - present - on_leave, 0)
 
-        # Department-wise breakdown (filtered)
+        # Department-wise breakdown (filtered progressively)
         dept_breakdown = []
         try:
-            cursor.execute(f"""
+            _execute_with_emp_filter(cursor, f"""
                 SELECT
                     NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown')) AS dept,
                     COUNT(*) AS total,
@@ -456,11 +482,11 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
                     FROM ATTENDANCE_RECORDS
                     WHERE TRUNC(ATTENDANCE_DATE) = {td} AND ENTRY_TIME IS NOT NULL
                 ) ar ON ar.card_no = TO_CHAR(e.CARD_NO)
-                WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){emp_filter}
+                WHERE (h.STATUS = 'A' OR h.STATUS IS NULL){{filter}}
                 GROUP BY NVL(dep.DEPT_NAME, NVL(TO_CHAR(h.DEPT_NO), 'Unknown'))
                 ORDER BY COUNT(*) DESC
                 FETCH FIRST 10 ROWS ONLY
-            """, emp_params)
+            """, compc, brnch)
             rows = cursor.fetchall()
             for r in rows:
                 dept_breakdown.append({
@@ -471,13 +497,14 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Department breakdown failed: {e}")
 
-        # Recent hires (last 30 days) — filtered
+        # Recent hires (last 30 days) — filtered progressively
         recent_hires = 0
         try:
-            cursor.execute(f"""
-                SELECT COUNT(*) FROM HR_EMP_MASTER h
-                WHERE h.DTOFAPPT >= SYSDATE - 30{emp_filter}
-            """, emp_params)
+            _execute_with_emp_filter(
+                cursor,
+                "SELECT COUNT(*) FROM HR_EMP_MASTER h WHERE h.DTOFAPPT >= SYSDATE - 30{filter}",
+                compc, brnch,
+            )
             recent_hires = int(cursor.fetchone()[0] or 0)
         except Exception:
             pass
@@ -502,10 +529,10 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Yesterday stats failed: {e}")
 
-        # Upcoming birthdays (next 14 days) — filtered
+        # Upcoming birthdays (next 14 days) — filtered progressively
         upcoming_birthdays = []
         try:
-            cursor.execute(f"""
+            _execute_with_emp_filter(cursor, """
                 SELECT h.NAME,
                     TO_CHAR(h.DTOFBRTH, 'DD Mon') AS bday,
                     NVL(dep.DEPT_NAME, 'N/A') AS dept,
@@ -516,10 +543,10 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
                 WHERE (h.STATUS = 'A' OR h.STATUS IS NULL)
                   AND h.DTOFBRTH IS NOT NULL
                   AND MOD(TO_NUMBER(TO_CHAR(h.DTOFBRTH, 'DDD'))
-                      - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14{emp_filter}
+                      - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14{filter}
                 ORDER BY days_until
                 FETCH FIRST 8 ROWS ONLY
-            """, emp_params)
+            """, compc, brnch)
             for r in cursor.fetchall():
                 upcoming_birthdays.append({
                     "name": r[0] or "Unknown",
@@ -530,10 +557,10 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
         except Exception as e:
             print(f"[HR_DASHBOARD] Birthdays failed: {e}")
 
-        # Upcoming work anniversaries (next 14 days) — filtered
+        # Upcoming work anniversaries (next 14 days) — filtered progressively
         upcoming_anniversaries = []
         try:
-            cursor.execute(f"""
+            _execute_with_emp_filter(cursor, """
                 SELECT h.NAME,
                     TO_CHAR(h.DTOFAPPT, 'DD Mon') AS ann_date,
                     TO_NUMBER(TO_CHAR(SYSDATE, 'YYYY'))
@@ -548,10 +575,10 @@ def get_hr_dashboard_stats(qdate: str = None, compc=None, brnch=None) -> dict:
                   AND MOD(TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'DDD'))
                       - TO_NUMBER(TO_CHAR(SYSDATE, 'DDD')) + 365, 365) <= 14
                   AND TO_NUMBER(TO_CHAR(SYSDATE, 'YYYY'))
-                      > TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'YYYY')){emp_filter}
+                      > TO_NUMBER(TO_CHAR(h.DTOFAPPT, 'YYYY')){filter}
                 ORDER BY days_until
                 FETCH FIRST 8 ROWS ONLY
-            """, emp_params)
+            """, compc, brnch)
             for r in cursor.fetchall():
                 upcoming_anniversaries.append({
                     "name": r[0] or "Unknown",

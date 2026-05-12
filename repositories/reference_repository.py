@@ -3,36 +3,53 @@
 from core.database import get_connection
 
 
-def _try_filtered(cursor, filtered_sql, filtered_params, fallback_sql, fallback_params):
-    """Try filtered query. If it fails (e.g. column doesn't exist, table missing,
-    or bind issues), fall back to the unfiltered query so the endpoint still works."""
+def _coerce(val):
     try:
-        cursor.execute(filtered_sql, filtered_params)
-        return cursor.fetchall(), [c[0].lower() for c in cursor.description]
-    except Exception as e:
-        print(f"[REFERENCE] Filter not applicable, using fallback: {str(e).splitlines()[0][:120]}")
-        cursor.execute(fallback_sql, fallback_params)
-        return cursor.fetchall(), [c[0].lower() for c in cursor.description]
+        return int(val)
+    except (ValueError, TypeError):
+        return val
 
 
-def _build_filter(compc=None, brnch=None):
-    """Return list of WHERE-clause parts and a params dict for COMPC/BRNCH filters.
-    Bind placeholders MUST start with a letter (Oracle rule) — using fcompc/fbrnch."""
-    parts = []
-    params = {}
+def _try_progressive(cursor, sql_template: str, compc=None, brnch=None):
+    """Run sql_template with {filter} placeholder, trying filters progressively:
+       1) COMPC + BRNCH (if both supplied)
+       2) COMPC only (if supplied)
+       3) BRNCH only (if supplied)
+       4) Unfiltered
+    Each attempt that fails with ORA-00904 (column missing) advances to the next.
+    Returns rows from the first successful attempt.
+    """
+    attempts = []
+    if compc and brnch:
+        attempts.append((
+            "AND COMPC = :fcompc AND BRNCH = :fbrnch",
+            {"fcompc": _coerce(compc), "fbrnch": _coerce(brnch)},
+        ))
     if compc:
-        parts.append("COMPC = :fcompc")
-        try:
-            params["fcompc"] = int(compc)
-        except (ValueError, TypeError):
-            params["fcompc"] = compc
+        attempts.append((
+            "AND COMPC = :fcompc",
+            {"fcompc": _coerce(compc)},
+        ))
     if brnch:
-        parts.append("BRNCH = :fbrnch")
+        attempts.append((
+            "AND BRNCH = :fbrnch",
+            {"fbrnch": _coerce(brnch)},
+        ))
+    attempts.append(("", {}))
+
+    last_err = None
+    for filter_sql, params in attempts:
         try:
-            params["fbrnch"] = int(brnch)
-        except (ValueError, TypeError):
-            params["fbrnch"] = brnch
-    return parts, params
+            cursor.execute(sql_template.replace("{filter}", filter_sql), params)
+            return cursor.fetchall()
+        except Exception as e:
+            msg = str(e)
+            if "ORA-00904" in msg:
+                last_err = msg.splitlines()[0][:100]
+                continue
+            raise
+    print(f"[REFERENCE] All filter attempts failed: {last_err}")
+    return []
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -43,13 +60,11 @@ def get_departments(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        fallback_sql = "SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT ORDER BY DEPT_NAME"
-        if filt:
-            filtered_sql = f"SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT WHERE {' AND '.join(filt)} ORDER BY DEPT_NAME"
-            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
-        else:
-            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        rows = _try_progressive(
+            cursor,
+            "SELECT DEPT_NO, DEPT_NAME FROM HR_DEPT WHERE 1=1 {filter} ORDER BY DEPT_NAME",
+            compc, brnch,
+        )
         return [{"dept_no": r[0], "dept_name": (r[1] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
@@ -59,13 +74,11 @@ def get_grades(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        fallback_sql = "SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE (STATUS = 'A' OR STATUS IS NULL) ORDER BY GRADE_CD"
-        if filt:
-            filtered_sql = f"SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE (STATUS = 'A' OR STATUS IS NULL) AND {' AND '.join(filt)} ORDER BY GRADE_CD"
-            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
-        else:
-            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        rows = _try_progressive(
+            cursor,
+            "SELECT GRADE_CD, DESCR FROM HR_GRADE_CD WHERE (STATUS = 'A' OR STATUS IS NULL) {filter} ORDER BY GRADE_CD",
+            compc, brnch,
+        )
         return [{"grade_cd": (r[0] or "").strip(), "descr": (r[1] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
@@ -75,20 +88,35 @@ def get_designations(grade_cd: str = None, compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        base_where = []
-        base_params = {}
+        # For designations we keep grade_cd as a regular filter and add compc/brnch progressively.
+        base_filter = "1=1"
         if grade_cd:
-            base_where.append("GRADE_CD = :g")
-            base_params["g"] = grade_cd
-        fallback_where = (" WHERE " + " AND ".join(base_where)) if base_where else ""
-        fallback_sql = f"SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG{fallback_where} ORDER BY GRADE_CD, DESG_CD"
-        if filt:
-            all_parts = base_where + filt
-            filtered_sql = f"SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG WHERE {' AND '.join(all_parts)} ORDER BY GRADE_CD, DESG_CD"
-            rows, _ = _try_filtered(cursor, filtered_sql, {**base_params, **fparams}, fallback_sql, base_params)
-        else:
-            cursor.execute(fallback_sql, base_params); rows = cursor.fetchall()
+            base_filter += " AND GRADE_CD = :gradecd"
+        template = f"SELECT GRADE_CD, DESG_CD, DESG_DESC FROM HR_DESG WHERE {base_filter} {{filter}} ORDER BY GRADE_CD, DESG_CD"
+        # _try_progressive doesn't know about :gradecd, so we inline it via a closure
+        attempts = []
+        base_params = {"gradecd": grade_cd} if grade_cd else {}
+        if compc and brnch:
+            attempts.append(("AND COMPC = :fcompc AND BRNCH = :fbrnch",
+                             {**base_params, "fcompc": _coerce(compc), "fbrnch": _coerce(brnch)}))
+        if compc:
+            attempts.append(("AND COMPC = :fcompc",
+                             {**base_params, "fcompc": _coerce(compc)}))
+        if brnch:
+            attempts.append(("AND BRNCH = :fbrnch",
+                             {**base_params, "fbrnch": _coerce(brnch)}))
+        attempts.append(("", base_params))
+
+        rows = []
+        for filter_sql, params in attempts:
+            try:
+                cursor.execute(template.replace("{filter}", filter_sql), params)
+                rows = cursor.fetchall()
+                break
+            except Exception as e:
+                if "ORA-00904" in str(e):
+                    continue
+                raise
         return [{"grade_cd": (r[0] or "").strip(), "desg_cd": str(r[1]).strip(), "desg_desc": (r[2] or "").strip()} for r in rows]
     finally:
         cursor.close(); conn.close()
@@ -98,13 +126,11 @@ def get_shifts(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        fallback_sql = "SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD ORDER BY SHIFT"
-        if filt:
-            filtered_sql = f"SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD WHERE {' AND '.join(filt)} ORDER BY SHIFT"
-            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
-        else:
-            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        rows = _try_progressive(
+            cursor,
+            "SELECT SHIFT, SHIFT_DESC, TIME_FROM, TIME_TO FROM SHIFT_HEAD WHERE 1=1 {filter} ORDER BY SHIFT",
+            compc, brnch,
+        )
         return [{"shift": r[0], "shift_desc": (r[1] or "").strip(),
                  "time_from": r[2], "time_to": r[3]} for r in rows]
     finally:
@@ -115,13 +141,11 @@ def get_blood_groups(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        fallback_sql = "SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP ORDER BY BLOOD_GROUP_PK"
-        if filt:
-            filtered_sql = f"SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP WHERE {' AND '.join(filt)} ORDER BY BLOOD_GROUP_PK"
-            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
-        else:
-            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        rows = _try_progressive(
+            cursor,
+            "SELECT BLOOD_GROUP_PK, BLOOD_GROUP FROM BLOOD_GROUP WHERE 1=1 {filter} ORDER BY BLOOD_GROUP_PK",
+            compc, brnch,
+        )
         return [{"pk": r[0], "blood_group": r[1]} for r in rows]
     finally:
         cursor.close(); conn.close()
@@ -131,13 +155,11 @@ def get_cadre(compc=None, brnch=None) -> list:
     conn = get_connection()
     cursor = conn.cursor()
     try:
-        filt, fparams = _build_filter(compc, brnch)
-        fallback_sql = "SELECT CADRE_PK, CADRE FROM CADRE ORDER BY CADRE"
-        if filt:
-            filtered_sql = f"SELECT CADRE_PK, CADRE FROM CADRE WHERE {' AND '.join(filt)} ORDER BY CADRE"
-            rows, _ = _try_filtered(cursor, filtered_sql, fparams, fallback_sql, {})
-        else:
-            cursor.execute(fallback_sql); rows = cursor.fetchall()
+        rows = _try_progressive(
+            cursor,
+            "SELECT CADRE_PK, CADRE FROM CADRE WHERE 1=1 {filter} ORDER BY CADRE",
+            compc, brnch,
+        )
         return [{"pk": r[0], "cadre": r[1]} for r in rows]
     finally:
         cursor.close(); conn.close()
